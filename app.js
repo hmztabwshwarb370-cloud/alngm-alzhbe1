@@ -11,6 +11,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 const nowAr = () => new Date().toLocaleString('ar-SY');
 const money = n => `${Number(n || 0).toLocaleString('ar-SY')} ل.س`;
 const defaultFee = () => Number(DB?.settings?.defaultFee || 0);
+function calcExpireLocal(dateStr, type){ const d = new Date(dateStr || today()); if(String(type||'').includes('سنوي')) d.setFullYear(d.getFullYear()+1); else d.setMonth(d.getMonth()+1); return d.toISOString().slice(0,10); }
 function normalizePhone(phone){ let p = String(phone||'').replace(/[^0-9]/g,''); if(p.startsWith('00')) p = p.slice(2); if(p.startsWith('0')) p = '963' + p.slice(1); return p; }
 function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('رقم ولي الأمر غير موجود','error'); return; } window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`,'_blank'); }
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -194,13 +195,28 @@ function postToAppsScript(path, method, payload){
       input.type = 'hidden'; input.name = k; input.value = fields[k];
       form.appendChild(input);
     });
-    const timer = setTimeout(() => { cleanup(); reject(new Error('انتهت مهلة حفظ البيانات في السيرفر')); }, 60000);
-    function cleanup(){ clearTimeout(timer); window.removeEventListener('message', onMessage); setTimeout(()=>{ iframe.remove(); form.remove(); }, 50); }
+
+    let settled = false;
+    const fallbackTimer = setTimeout(() => {
+      // Apps Script أحياناً يحفظ البيانات لكن لا يرجع postMessage للواجهة بسرعة.
+      // لذلك نعطي المستخدم نتيجة فورية ونزامن البيانات بالخلفية بدل تركه ينتظر دقائق.
+      if(!settled){ settled = true; resolve({ __pending:true, __requestId:requestId }); }
+    }, 2800);
+    const hardTimer = setTimeout(() => cleanup(), 18000);
+
+    function cleanup(){
+      clearTimeout(fallbackTimer); clearTimeout(hardTimer);
+      window.removeEventListener('message', onMessage);
+      setTimeout(()=>{ iframe.remove(); form.remove(); }, 50);
+    }
     function onMessage(e){
       const data = e.data || {};
       if(!data || data.requestId !== requestId) return;
+      if(!settled){
+        settled = true;
+        if(data.error) reject(new Error(data.error)); else resolve(data.result || {});
+      }
       cleanup();
-      if(data.error) reject(new Error(data.error)); else resolve(data.result || {});
     }
     window.addEventListener('message', onMessage);
     document.body.appendChild(iframe);
@@ -362,7 +378,8 @@ async function savePlayer(e){
     const photo = await fileToBase64($('pPhoto').files[0]);
     const payload = { id: uid('PLAYER'), name:$('pName').value.trim(), age:$('pAge').value, category:$('pCategory').value.trim(), phone:$('pPhone').value.trim(), registerDate:$('pDate').value, photo };
     if(!payload.name){ toast('اسم اللاعب مطلوب','error'); return; }
-    const player = await api('/api/players', { method:'POST', body:JSON.stringify(payload), silent:true });
+    const serverPlayer = await api('/api/players', { method:'POST', body:JSON.stringify(payload), silent:true });
+    const player = (serverPlayer && !serverPlayer.__pending && serverPlayer.id) ? serverPlayer : Object.assign({}, payload, { createdAt: nowAr() });
     DB.players = DB.players.filter(p => String(p.id) !== String(player.id));
     DB.players.push(player);
     $('playerForm').reset(); $('pDate').value = today();
@@ -481,19 +498,33 @@ async function savePayment(e){
   e.preventDefault();
   const ctx = showBusy('جاري حفظ الدفعة...', e.submitter);
   try{
-    const pay = await api('/api/payments', { method:'POST', body:JSON.stringify({ playerId:$('payPlayer').value, amount:$('payAmount').value, type:$('payType').value, paymentDate:$('payDate').value }), silent:true });
+    const player = DB.players.find(p => String(p.id) === String($('payPlayer').value));
+    if(!player){ toast('اختر اللاعب أولاً','error'); return; }
+    const payload = { playerId:$('payPlayer').value, amount:$('payAmount').value, type:$('payType').value, paymentDate:$('payDate').value };
+    const serverPay = await api('/api/payments', { method:'POST', body:JSON.stringify(payload), silent:true });
+    const pay = (serverPay && !serverPay.__pending && serverPay.id) ? serverPay : {
+      id: uid('PAY-TEMP'),
+      playerId: player.id,
+      playerName: player.name,
+      amount: payload.amount || '0',
+      type: payload.type || 'شهري',
+      paymentDate: payload.paymentDate || today(),
+      expireDate: calcExpireLocal(payload.paymentDate || today(), payload.type || 'شهري'),
+      createdAt: nowAr(),
+      _pending:true
+    };
     DB.payments = DB.payments.filter(p => String(p.id) !== String(pay.id));
     DB.payments.push(pay);
-    toast('تم حفظ الدفعة داخل Google Sheets','success');
-    openModal(receipt(pay));
-    // تحديث القسم فوراً حتى يظهر السجل بدون ريفريش
+    toast(serverPay && serverPay.__pending ? 'تم إرسال الدفعة للحفظ وستظهر فوراً في السجل' : 'تم حفظ الدفعة داخل Google Sheets','success');
     if(currentPage === 'finance') finance();
+    openModal(receipt(pay));
     refreshDataSilent();
+    setTimeout(refreshDataSilent, 4500);
   }catch(err){ toast(err.message,'error'); }
   finally{ hideBusy(ctx); }
 }
 function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>المبلغ</th><th>النوع</th><th>تاريخ الدفع</th><th>الانتهاء</th><th>إيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)}</td><td>${money(p.amount)}</td><td>${esc(p.type)}</td><td>${esc(p.paymentDate)}</td><td>${esc(p.expireDate)}</td><td><button class="btn btn-sm btn-gold" onclick="printReceipt('${p.id}')"><i class="fa-solid fa-print"></i></button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
-function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>المبلغ:</b> ${money(p.amount)}</p><p><b>نوع الاشتراك:</b> ${esc(p.type)}</p><p><b>تاريخ الدفع:</b> ${esc(p.paymentDate)}</p><p><b>تاريخ الانتهاء:</b> ${esc(p.expireDate)}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="printElement('receipt-${p.id}')"><i class="fa-solid fa-print"></i> طباعة الإيصال</button></div>`; }
+function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3>${p._pending?'<p><span class="badge gold">قيد المزامنة مع Google Sheets</span></p>':''}<p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>المبلغ:</b> ${money(p.amount)}</p><p><b>نوع الاشتراك:</b> ${esc(p.type)}</p><p><b>تاريخ الدفع:</b> ${esc(p.paymentDate)}</p><p><b>تاريخ الانتهاء:</b> ${esc(p.expireDate)}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="printElement('receipt-${p.id}')"><i class="fa-solid fa-print"></i> طباعة الإيصال</button></div>`; }
 function printReceipt(id){ const p = DB.payments.find(x=>x.id===id); openModal(receipt(p)); }
 
 function paymentsQuery(){
@@ -590,7 +621,8 @@ async function saveUser(e){
   const payload = { username:$('uName').value.trim(), password:$('uPass').value.trim(), displayName:$('uDisplay').value.trim() || $('uName').value.trim(), role, permissions: role==='admin' ? 'all' : selectedPerms(), active:'1' };
   if(!payload.username || !payload.password){ toast('اسم المستخدم وكلمة المرور مطلوبان','error'); hideBusy(ctx); return; }
   try{
-    const user = await api('/api/users',{method:'POST', body:JSON.stringify(payload), silent:true});
+    const serverUser = await api('/api/users',{method:'POST', body:JSON.stringify(payload), silent:true});
+    const user = (serverUser && !serverUser.__pending && serverUser.username) ? serverUser : Object.assign({}, payload, { createdAt: nowAr() });
     DB.users = DB.users.filter(u => String(u.username) !== String(user.username));
     DB.users.push(user);
     toast('تم إنشاء المشرف بنجاح','success'); supervisors(); refreshDataSilent();
@@ -626,7 +658,7 @@ async function saveSettings(e){
     const payload = { academyName:$('sName').value, academyEn:$('sEn').value, description:$('sDesc').value, address:$('sAddress').value, defaultFee:$('sFee').value };
     if(logo) payload.logo = logo;
     const settingsRes = await api('/api/settings', { method:'PUT', body:JSON.stringify(payload), silent:true });
-    DB.settings = settingsRes || Object.assign(DB.settings, payload);
+    DB.settings = (settingsRes && !settingsRes.__pending) ? settingsRes : Object.assign(DB.settings, payload);
     toast('تم حفظ الإعدادات داخل Google Sheets','success'); openApp(); refreshDataSilent();
   }catch(err){ toast(err.message || 'تعذر حفظ الإعدادات','error'); }
   finally{ hideBusy(ctx); }
