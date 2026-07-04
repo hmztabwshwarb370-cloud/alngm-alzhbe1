@@ -11,143 +11,90 @@ const today = () => new Date().toISOString().slice(0, 10);
 const nowAr = () => new Date().toLocaleString('ar-SY');
 const money = n => `${Number(n || 0).toLocaleString('ar-SY')} ل.س`;
 const defaultFee = () => Number(DB?.settings?.defaultFee || 0);
-function calcExpireLocal(dateStr, type){ const d = new Date(dateStr || today()); if(String(type||'').includes('سنوي')) d.setFullYear(d.getFullYear()+1); else d.setMonth(d.getMonth()+1); return d.toISOString().slice(0,10); }
 function normalizePhone(phone){ let p = String(phone||'').replace(/[^0-9]/g,''); if(p.startsWith('00')) p = p.slice(2); if(p.startsWith('0')) p = '963' + p.slice(1); return p; }
 function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('رقم ولي الأمر غير موجود','error'); return; } window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`,'_blank'); }
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const uid = p => `${p}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
 
-
-/* ===== تحسين الاستجابة: تحميل الأزرار + منع تجميد إحساس المستخدم ===== */
-let __lastClickedButton = null;
-let __lastClickedAt = 0;
-let __busyDepth = 0;
-let __busyContext = null;
-
-function installBusyStyles(){
-  if(document.getElementById('golden-star-busy-style')) return;
-  const style = document.createElement('style');
-  style.id = 'golden-star-busy-style';
-  style.textContent = `
-    button.gs-busy, .btn.gs-busy{
-      opacity:.88!important; cursor:wait!important; pointer-events:none!important;
-      filter:saturate(.9); position:relative;
-    }
-    .gs-spin{
-      width:15px;height:15px;border:2px solid rgba(7,17,31,.25);border-top-color:#07111f;
-      border-radius:50%;display:inline-block;vertical-align:middle;margin-inline-end:7px;
-      animation:gsSpin .75s linear infinite;
-    }
-    @keyframes gsSpin{to{transform:rotate(360deg)}}
-    #gsBusyOverlay{
-      position:fixed;z-index:999999;top:18px;left:50%;transform:translateX(-50%);
-      background:#07111f;color:#fff;border:1px solid rgba(212,175,55,.7);border-radius:999px;
-      box-shadow:0 12px 35px rgba(0,0,0,.25);padding:10px 18px;font-weight:800;
-      display:none;align-items:center;gap:8px;font-family:Cairo,Arial,sans-serif;
-    }
-    #gsBusyOverlay.show{display:flex;}
-    #gsBusyOverlay .gs-spin{border-color:rgba(255,255,255,.35);border-top-color:#f6d76b;margin:0;}
-  `;
-  document.head.appendChild(style);
-}
-
-function rememberButton(btn){
+function currentSubmitButton(e){ return e?.submitter || document.activeElement?.closest?.('button') || null; }
+function setBtnBusy(btn, text='جاري العمل...'){
   if(!btn) return;
-  __lastClickedButton = btn;
-  __lastClickedAt = Date.now();
+  if(!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${esc(text)}`;
 }
-
-function recentButton(){
-  if(!__lastClickedButton) return null;
-  if(Date.now() - __lastClickedAt > 4000) return null;
-  if(!document.body.contains(__lastClickedButton)) return null;
-  return __lastClickedButton;
+function resetBtnBusy(btn){
+  if(!btn) return;
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+  if(btn.dataset.originalHtml){ btn.innerHTML = btn.dataset.originalHtml; delete btn.dataset.originalHtml; }
 }
-
-document.addEventListener('click', e => {
-  const btn = e.target.closest('button,.btn');
-  if(btn && !btn.classList.contains('menu-item')) rememberButton(btn);
-}, true);
-
-document.addEventListener('submit', e => {
-  rememberButton(e.submitter || e.target.querySelector('button[type="submit"],button,.btn'));
-}, true);
-
-function showBusy(label='جاري العمل...', btn=null){
-  installBusyStyles();
-  if(__busyDepth > 0){ __busyDepth++; return { nested:true }; }
-  __busyDepth = 1;
-  btn = btn || recentButton();
-  const overlay = document.getElementById('gsBusyOverlay') || (() => {
-    const o = document.createElement('div');
-    o.id = 'gsBusyOverlay';
-    document.body.appendChild(o);
-    return o;
-  })();
-  overlay.innerHTML = `<span class="gs-spin"></span><span>${esc(label)}</span>`;
-  overlay.classList.add('show');
-  let oldHtml = null;
-  if(btn){
-    oldHtml = btn.innerHTML;
-    btn.classList.add('gs-busy');
-    btn.disabled = true;
-    btn.innerHTML = `<span class="gs-spin"></span>${esc(label)}`;
+function setGlobalBusy(text='جاري العمل...'){
+  let bar = document.getElementById('globalBusyBar');
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'globalBusyBar';
+    bar.style.cssText = 'position:fixed;top:0;right:0;left:0;z-index:99999;background:linear-gradient(135deg,#d4af37,#f6d76b);color:#07111f;font-weight:900;text-align:center;padding:10px;font-family:Cairo,Arial;box-shadow:0 8px 25px rgba(0,0,0,.18)';
+    document.body.appendChild(bar);
   }
-  __busyContext = { btn, oldHtml, overlay, started:Date.now() };
-  return __busyContext;
+  bar.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${esc(text)}`;
 }
-
-function hideBusy(ctx){
-  if(ctx && ctx.nested){ __busyDepth = Math.max(0, __busyDepth - 1); return; }
-  if(__busyDepth <= 0) return;
-  __busyDepth = 0;
-  const c = ctx || __busyContext;
-  const elapsed = c ? Date.now() - c.started : 0;
-  const finish = () => {
-    if(c && c.btn){
-      c.btn.disabled = false;
-      c.btn.classList.remove('gs-busy');
-      if(c.oldHtml !== null) c.btn.innerHTML = c.oldHtml;
-    }
-    if(c && c.overlay) c.overlay.classList.remove('show');
-    __busyContext = null;
-    __lastClickedButton = null;
-  };
-  if(elapsed < 450) setTimeout(finish, 450 - elapsed); else finish();
+function clearGlobalBusy(){ const bar = document.getElementById('globalBusyBar'); if(bar) bar.remove(); }
+function calcExpireDate(dateStr, type){
+  const d = new Date(dateStr || today());
+  if(String(type||'').includes('سنوي')) d.setFullYear(d.getFullYear()+1); else d.setMonth(d.getMonth()+1);
+  return d.toISOString().slice(0,10);
 }
-
-function apiBusyLabel(path, method){
-  method = String(method || 'GET').toUpperCase();
-  if(path === '/api/data') return 'جاري تحديث البيانات...';
-  if(path.includes('/api/players') && method === 'POST') return 'جاري حفظ اللاعب...';
-  if(path.includes('/api/payments') && method === 'POST') return 'جاري حفظ الدفعة...';
-  if(path.includes('/api/users') && method === 'POST') return 'جاري حفظ المشرف...';
-  if(path.includes('/api/settings')) return 'جاري حفظ الإعدادات...';
-  if(method === 'DELETE') return 'جاري الحذف...';
-  return 'جاري العمل...';
+function postFast(path, method, payload){
+  // إرسال سريع بدون انتظار رد Apps Script؛ يمنع تعليق الواجهة عندما يحفظ السيرفر ولا يرجع رسالة بسرعة.
+  try{
+    ensureApiUrl();
+    const iframeName = 'fast_iframe_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+    const iframe = document.createElement('iframe');
+    iframe.name = iframeName;
+    iframe.style.display = 'none';
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = API_URL;
+    form.target = iframeName;
+    form.style.display = 'none';
+    const fields = { requestId:'fast_'+Date.now(), action:'api', path, method:method || 'POST', payload: JSON.stringify(payload || {}) };
+    Object.keys(fields).forEach(k => { const input=document.createElement('input'); input.type='hidden'; input.name=k; input.value=fields[k]; form.appendChild(input); });
+    document.body.appendChild(iframe); document.body.appendChild(form); form.submit();
+    setTimeout(()=>{ try{ iframe.remove(); form.remove(); }catch(e){} }, 9000);
+    return Promise.resolve({ ok:true, fast:true });
+  }catch(err){ return Promise.reject(err); }
 }
-
-async function refreshDataSilent(){
-  try{ await loadData({ silent:true }); }
-  catch(e){ console.warn('تعذر تحديث البيانات في الخلفية:', e); }
+function refreshDataInBackground(delay=6000){
+  setTimeout(async()=>{ try{ await loadData(); if(currentPage==='finance') finance(); if(currentPage==='players') renderPlayersTable(); if(currentPage==='dashboard') dashboard(); }catch(e){ console.warn('background sync failed', e); } }, delay);
+}
+function findPlayerByNameOrId(value){
+  const q = String(value||'').trim();
+  if(!q) return null;
+  return DB.players.find(p => String(p.id)===q || String(p.name)===q) || DB.players.find(p => String(p.name||'').includes(q));
 }
 
 const fallbackUsers = [
   { username: 'admin', password: 'admin123', role: 'admin', displayName: 'المدير العام', permissions:'all', active:'1' },
-  { username: 'finance', password: 'finance123', role: 'finance', displayName: 'قسم المالية', permissions:'dashboard,finance,paymentsQuery', active:'1' },
-  { username: 'attendance', password: 'att123', role: 'attendance', displayName: 'قسم التفقد والغياب', permissions:'dashboard,qrAttendance,absences', active:'1' }
+  { username: 'finance', password: 'finance123', role: 'finance', displayName: 'قسم المالية', permissions:'dashboard,finance,paymentsQuery', active:'1' }
 ];
 const menuItems = [
-  { id:'dashboard', title:'الرئيسية', icon:'fa-chart-pie', roles:['admin','finance','attendance'] },
+  { id:'dashboard', title:'الرئيسية', icon:'fa-chart-pie', roles:['admin','finance'] },
   { id:'players', title:'شؤون اللاعبين', icon:'fa-person-running', roles:['admin'] },
-  { id:'qrAttendance', title:'التفقد عبر QR', icon:'fa-qrcode', roles:['admin','attendance'] },
   { id:'finance', title:'المالية والمحاسبة', icon:'fa-wallet', roles:['admin','finance'] },
   { id:'paymentsQuery', title:'الاستعلام عن الدفعات', icon:'fa-magnifying-glass-dollar', roles:['admin','finance'] },
-  { id:'absences', title:'الغيابات', icon:'fa-user-xmark', roles:['admin','attendance'] },
   { id:'supervisors', title:'المشرفون والصلاحيات', icon:'fa-users-gear', roles:['admin'] },
   { id:'settings', title:'إعدادات المؤسسة', icon:'fa-gear', roles:['admin'] }
 ];
 
+
+
+(function injectBusyStyle(){
+  const st = document.createElement('style');
+  st.textContent = `.btn.is-busy{opacity:.8;cursor:wait!important;pointer-events:none}.btn.is-busy i{margin-inline-end:4px}`;
+  document.head.appendChild(st);
+})();
 
 function userList(){ return (DB?.users?.length ? DB.users : fallbackUsers).map(u => ({...u, name: u.displayName || u.name || u.username})); }
 function userPerms(u){ return String(u?.permissions || '').split(',').map(x=>x.trim()).filter(Boolean); }
@@ -195,28 +142,13 @@ function postToAppsScript(path, method, payload){
       input.type = 'hidden'; input.name = k; input.value = fields[k];
       form.appendChild(input);
     });
-
-    let settled = false;
-    const fallbackTimer = setTimeout(() => {
-      // Apps Script أحياناً يحفظ البيانات لكن لا يرجع postMessage للواجهة بسرعة.
-      // لذلك نعطي المستخدم نتيجة فورية ونزامن البيانات بالخلفية بدل تركه ينتظر دقائق.
-      if(!settled){ settled = true; resolve({ __pending:true, __requestId:requestId }); }
-    }, 2800);
-    const hardTimer = setTimeout(() => cleanup(), 18000);
-
-    function cleanup(){
-      clearTimeout(fallbackTimer); clearTimeout(hardTimer);
-      window.removeEventListener('message', onMessage);
-      setTimeout(()=>{ iframe.remove(); form.remove(); }, 50);
-    }
+    const timer = setTimeout(() => { cleanup(); reject(new Error('انتهت مهلة حفظ البيانات في السيرفر')); }, 60000);
+    function cleanup(){ clearTimeout(timer); window.removeEventListener('message', onMessage); setTimeout(()=>{ iframe.remove(); form.remove(); }, 50); }
     function onMessage(e){
       const data = e.data || {};
       if(!data || data.requestId !== requestId) return;
-      if(!settled){
-        settled = true;
-        if(data.error) reject(new Error(data.error)); else resolve(data.result || {});
-      }
       cleanup();
+      if(data.error) reject(new Error(data.error)); else resolve(data.result || {});
     }
     window.addEventListener('message', onMessage);
     document.body.appendChild(iframe);
@@ -226,18 +158,12 @@ function postToAppsScript(path, method, payload){
 }
 async function api(path, options={}){
   const method = String(options.method || 'GET').toUpperCase();
-  const silent = options.silent === true;
-  const ctx = silent ? null : showBusy(apiBusyLabel(path, method));
-  try{
-    if(method === 'GET') return await jsonpRequest(path);
-    let payload = {};
-    try{ payload = options.body ? JSON.parse(options.body) : {}; }catch(e){ payload = {}; }
-    return await postToAppsScript(path, method, payload);
-  }finally{
-    if(ctx) hideBusy(ctx);
-  }
+  if(method === 'GET') return jsonpRequest(path);
+  let payload = {};
+  try{ payload = options.body ? JSON.parse(options.body) : {}; }catch(e){ payload = {}; }
+  return postToAppsScript(path, method, payload);
 }
-async function loadData(options={}){ DB = await api('/api/data', { silent: options.silent !== false }); return DB; }
+async function loadData(){ DB = await api('/api/data'); return DB; }
 function fileToBase64(file){ return new Promise(resolve => { if(!file) return resolve(''); const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(file); }); }
 function logoHtml(){ const logo = DB?.settings?.logo || ''; return logo ? `<img src="${esc(logo)}" alt="logo" onerror="this.style.display='none'; this.parentElement.innerHTML='<i class=&quot;fa-solid fa-star&quot;></i>';">` : `<i class="fa-solid fa-star"></i>`; }
 function avatar(p, cls='avatar'){ return p?.photo ? `<img class="${cls}" src="${p.photo}" alt="${esc(p.name)}">` : `<div class="${cls}" style="display:grid;place-items:center"><i class="fa-solid fa-user"></i></div>`; }
@@ -272,7 +198,7 @@ function bind(){
   $('mobileToggle').addEventListener('click', () => $('sidebar').classList.toggle('open'));
   $('modalClose').addEventListener('click', closeModal);
   $('modal').addEventListener('click', e => { if(e.target.id === 'modal') closeModal(); });
-  $('quickScanBtn').addEventListener('click', () => navigate('qrAttendance'));
+  if($('quickScanBtn')){ $('quickScanBtn').style.display='none'; $('quickScanBtn').onclick = null; }
   $('backupBtn').addEventListener('click', openDatabaseFile);
   $('importFile').addEventListener('change', async e => toast('الاستيراد المباشر غير مفعل في نسخة GitHub. يمكنك تعديل Google Sheet مباشرة أو طلب ميزة استيراد لاحقاً.'));
   if(!API_URL.includes('PASTE_')) console.log('Apps Script API:', API_URL);
@@ -282,22 +208,18 @@ function renderLoginBrand(){
   $('loginLogoBox').innerHTML = logoHtml();
 }
 function login(){
-  const ctx = showBusy('جاري الدخول...', $('loginBtn'));
-  setTimeout(() => {
-    const u = $('loginUser').value.trim(); const p = $('loginPass').value.trim();
-    const found = userList().find(x => String(x.username) === u && String(x.password) === p && isActiveUser(x));
-    if(!found){ $('loginError').textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة أو الحساب غير مفعل'; hideBusy(ctx); return; }
-    currentUser = {
-      username:found.username,
-      role:found.role || 'custom',
-      name:found.displayName || found.name || found.username,
-      permissions:found.permissions || 'dashboard'
-    };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-    $('loginError').textContent = '';
-    openApp();
-    hideBusy(ctx);
-  }, 120);
+  const u = $('loginUser').value.trim(); const p = $('loginPass').value.trim();
+  const found = userList().find(x => String(x.username) === u && String(x.password) === p && isActiveUser(x));
+  if(!found){ $('loginError').textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة أو الحساب غير مفعل'; return; }
+  currentUser = {
+    username:found.username,
+    role:found.role || 'custom',
+    name:found.displayName || found.name || found.username,
+    permissions:found.permissions || 'dashboard'
+  };
+  localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+  $('loginError').textContent = '';
+  openApp();
 }
 function logout(){ stopScanner(); localStorage.removeItem(SESSION_KEY); currentUser=null; $('appView').classList.add('hidden'); $('loginView').classList.remove('hidden'); renderLoginBrand(); }
 function openApp(){
@@ -315,7 +237,7 @@ function renderMenu(){
   document.querySelectorAll('.menu-item').forEach(btn => btn.onclick = () => navigate(btn.dataset.page));
 }
 async function navigate(page){
-  stopScanner(); if(!DB) await loadData({silent:true});
+  stopScanner();
   if(!canAccess(page)){
     const first = menuItems.find(m => m.roles.includes(currentUser.role) || userPerms(currentUser).includes(m.id));
     page = first?.id || 'dashboard';
@@ -324,22 +246,18 @@ async function navigate(page){
   const item = menuItems.find(x => x.id === page);
   $('pageTitle').textContent = item?.title || 'النظام';
   $('pageSubTitle').textContent = DB.settings.description || 'نظام إدارة أكاديمية رياضية أونلاين';
-  const map = { dashboard, players, qrAttendance, finance, paymentsQuery, absences, supervisors, settings };
+  const map = { dashboard, players, finance, paymentsQuery, supervisors, settings };
   map[page]();
   $('sidebar').classList.remove('open');
 }
 
 function dashboard(){
   const players = DB.players.length;
-  const todayAtt = DB.attendance.filter(a => String(a.date) === today()).length;
-  const absent = Math.max(players - todayAtt, 0);
   const revenue = DB.payments.reduce((s,p)=>s+Number(p.amount||0),0);
   const logs = DB.logs.slice(-10).reverse();
   $('content').innerHTML = `
     <div class="stats-grid">
       ${stat('fa-person-running','إجمالي اللاعبين',players,'blue')}
-      ${stat('fa-circle-check','حضور اليوم',todayAtt,'green')}
-      ${stat('fa-user-xmark','غيابات اليوم',absent,'red')}
       ${stat('fa-wallet','إجمالي الإيرادات',money(revenue),'gold')}
     </div>
     <div class="panel">
@@ -373,21 +291,19 @@ function players(){
 }
 async function savePlayer(e){
   e.preventDefault();
-  const ctx = showBusy('جاري حفظ اللاعب...', e.submitter);
+  const btn = currentSubmitButton(e);
+  const photo = await fileToBase64($('pPhoto').files[0]);
+  const payload = { id: uid('PLAYER'), name:$('pName').value.trim(), age:$('pAge').value, category:$('pCategory').value.trim(), phone:$('pPhone').value.trim(), registerDate:$('pDate').value, photo };
+  if(!payload.name) return toast('اسم اللاعب مطلوب','error');
+  setBtnBusy(btn, 'جاري حفظ اللاعب...'); setGlobalBusy('جاري حفظ اللاعب...');
   try{
-    const photo = await fileToBase64($('pPhoto').files[0]);
-    const payload = { id: uid('PLAYER'), name:$('pName').value.trim(), age:$('pAge').value, category:$('pCategory').value.trim(), phone:$('pPhone').value.trim(), registerDate:$('pDate').value, photo };
-    if(!payload.name){ toast('اسم اللاعب مطلوب','error'); return; }
-    const serverPlayer = await api('/api/players', { method:'POST', body:JSON.stringify(payload), silent:true });
-    const player = (serverPlayer && !serverPlayer.__pending && serverPlayer.id) ? serverPlayer : Object.assign({}, payload, { createdAt: nowAr() });
-    DB.players = DB.players.filter(p => String(p.id) !== String(player.id));
-    DB.players.push(player);
-    $('playerForm').reset(); $('pDate').value = today();
-    renderPlayersTable();
-    toast('تم حفظ اللاعب وظهر مباشرة في القائمة','success');
-    refreshDataSilent();
-  }catch(err){ toast(err.message || 'تعذر حفظ اللاعب','error'); }
-  finally{ hideBusy(ctx); }
+    DB.players.push(payload);
+    toast('تم حفظ اللاعب وظهر في القائمة','success');
+    $('playerForm').reset(); $('pDate').value = today(); renderPlayersTable();
+    postFast('/api/players', 'POST', payload).catch(err => toast('تنبيه: تعذر إرسال اللاعب للسيرفر، تحقق من الاتصال','error'));
+    refreshDataInBackground(8000);
+  }catch(err){ toast(err.message,'error'); }
+  finally{ resetBtnBusy(btn); clearGlobalBusy(); }
 }
 function renderPlayersTable(){
   const q = ($('playerSearch')?.value || '').trim();
@@ -482,7 +398,7 @@ async function handleScan(code){
   beep();
   try{
     const res = await api('/api/attendance', { method:'POST', body:JSON.stringify({playerId:query, query:code}) });
-    await loadData({silent:true});
+    await loadData();
     const p = res.player;
     $('scanResult').innerHTML = `<div class="scan-success"><div>${avatar(p,'success-photo')}</div><h2>${esc(p.name)}</h2><p>${res.already ? 'تم تسجيل حضوره مسبقاً اليوم' : 'تم تسجيل الحضور بنجاح'}</p><strong>${esc(res.time || '')}</strong></div>`;
     if($('manualCode')) $('manualCode').value='';
@@ -490,42 +406,56 @@ async function handleScan(code){
 }
 
 function finance(){
-  const opts = DB.players.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
-  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3></div><form id="payForm" class="form-grid"><div class="field span-2"><label>اختر اللاعب</label><select id="payPlayer"><option value="">اختر من القائمة</option>${opts}</select></div><div class="field"><label>المبلغ المدفوع</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div><div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div><div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div><button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ وطباعة إيصال</button></form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات من Excel</h3></div>${paymentsTable()}</div>`;
+  const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اكتب اسم اللاعب بدل القائمة</span></div><form id="payForm" class="form-grid"><div class="field span-2"><label>اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div><div class="field"><label>المبلغ المدفوع</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div><div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div><div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div><button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ الدفعة</button></form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات</h3></div>${paymentsTable()}</div>`;
   $('payForm').onsubmit = savePayment;
 }
 async function savePayment(e){
   e.preventDefault();
-  const ctx = showBusy('جاري حفظ الدفعة...', e.submitter);
+  const btn = currentSubmitButton(e);
+  const player = findPlayerByNameOrId($('payPlayerName').value);
+  if(!player) return toast('اكتب اسم لاعب صحيح من القائمة','error');
+  const amount = Number($('payAmount').value || 0);
+  if(!amount) return toast('أدخل مبلغ الدفعة','error');
+  const type = $('payType').value;
+  const paymentDate = $('payDate').value || today();
+  const localPay = {
+    id: uid('PAY'),
+    playerId: player.id,
+    playerName: player.name,
+    amount,
+    type,
+    paymentDate,
+    expireDate: calcExpireDate(paymentDate, type),
+    createdAt: nowAr(),
+    _pending: true
+  };
+  setBtnBusy(btn, 'جاري حفظ الدفعة...');
+  setGlobalBusy('جاري حفظ الدفعة...');
   try{
-    const player = DB.players.find(p => String(p.id) === String($('payPlayer').value));
-    if(!player){ toast('اختر اللاعب أولاً','error'); return; }
-    const payload = { playerId:$('payPlayer').value, amount:$('payAmount').value, type:$('payType').value, paymentDate:$('payDate').value };
-    const serverPay = await api('/api/payments', { method:'POST', body:JSON.stringify(payload), silent:true });
-    const pay = (serverPay && !serverPay.__pending && serverPay.id) ? serverPay : {
-      id: uid('PAY-TEMP'),
-      playerId: player.id,
-      playerName: player.name,
-      amount: payload.amount || '0',
-      type: payload.type || 'شهري',
-      paymentDate: payload.paymentDate || today(),
-      expireDate: calcExpireLocal(payload.paymentDate || today(), payload.type || 'شهري'),
-      createdAt: nowAr(),
-      _pending:true
-    };
-    DB.payments = DB.payments.filter(p => String(p.id) !== String(pay.id));
-    DB.payments.push(pay);
-    toast(serverPay && serverPay.__pending ? 'تم إرسال الدفعة للحفظ وستظهر فوراً في السجل' : 'تم حفظ الدفعة داخل Google Sheets','success');
-    if(currentPage === 'finance') finance();
-    openModal(receipt(pay));
-    refreshDataSilent();
-    setTimeout(refreshDataSilent, 4500);
+    // تحديث فوري للواجهة قبل انتظار Apps Script
+    DB.payments.push(localPay);
+    toast('تم الحفظ وظهرت الدفعة في السجل','success');
+    $('payForm').reset(); $('payDate').value = today(); $('payAmount').value = DB.settings.defaultFee || defaultFee();
+    finance();
+    sendReceiptWhatsApp(localPay.id);
+    // مزامنة مع Google Sheets بالخلفية بدون تعليق الواجهة
+    postFast('/api/payments', 'POST', { playerId:player.id, amount, type, paymentDate }).catch(err => toast('تنبيه: تعذر إرسال الدفعة للسيرفر، تحقق من الاتصال', 'error'));
+    refreshDataInBackground(7000);
   }catch(err){ toast(err.message,'error'); }
-  finally{ hideBusy(ctx); }
+  finally{ resetBtnBusy(btn); clearGlobalBusy(); }
 }
-function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>المبلغ</th><th>النوع</th><th>تاريخ الدفع</th><th>الانتهاء</th><th>إيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)}</td><td>${money(p.amount)}</td><td>${esc(p.type)}</td><td>${esc(p.paymentDate)}</td><td>${esc(p.expireDate)}</td><td><button class="btn btn-sm btn-gold" onclick="printReceipt('${p.id}')"><i class="fa-solid fa-print"></i></button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
-function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3>${p._pending?'<p><span class="badge gold">قيد المزامنة مع Google Sheets</span></p>':''}<p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>المبلغ:</b> ${money(p.amount)}</p><p><b>نوع الاشتراك:</b> ${esc(p.type)}</p><p><b>تاريخ الدفع:</b> ${esc(p.paymentDate)}</p><p><b>تاريخ الانتهاء:</b> ${esc(p.expireDate)}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="printElement('receipt-${p.id}')"><i class="fa-solid fa-print"></i> طباعة الإيصال</button></div>`; }
-function printReceipt(id){ const p = DB.payments.find(x=>x.id===id); openModal(receipt(p)); }
+function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>المبلغ</th><th>النوع</th><th>تاريخ الدفع</th><th>الانتهاء</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${money(p.amount)}</td><td>${esc(p.type)}</td><td>${esc(p.paymentDate)}</td><td>${esc(p.expireDate)}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function sendReceiptWhatsApp(id){
+  const p = DB.payments.find(x=>String(x.id)===String(id));
+  if(!p) return toast('لم يتم العثور على الدفعة','error');
+  const player = DB.players.find(x=>String(x.id)===String(p.playerId)) || {};
+  const phone = player.phone || player.guardianPhone || '';
+  const msg = `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nالمبلغ المدفوع: ${money(p.amount)}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${p.paymentDate}\nتاريخ الانتهاء: ${p.expireDate}\n\nشكراً لثقتكم بنا 🌟`;
+  waLink(phone, msg);
+}
+function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>المبلغ:</b> ${money(p.amount)}</p><p><b>نوع الاشتراك:</b> ${esc(p.type)}</p><p><b>تاريخ الدفع:</b> ${esc(p.paymentDate)}</p><p><b>تاريخ الانتهاء:</b> ${esc(p.expireDate)}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="printElement('receipt-${p.id}')"><i class="fa-solid fa-print"></i> طباعة الإيصال</button></div>`; }
+function printReceipt(id){ sendReceiptWhatsApp(id); }
 
 function paymentsQuery(){
   const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
@@ -585,11 +515,10 @@ function whatsapp(id){
   waLink(p.phone, msg);
 }
 
-function roleLabel(role){ return role==='admin'?'مدير عام':role==='finance'?'قسم المالية':role==='attendance'?'قسم التفقد والغياب':'مشرف مخصص'; }
+function roleLabel(role){ return role==='admin'?'مدير عام':role==='finance'?'قسم المالية':'مشرف مخصص'; }
 function defaultPermsForRole(role){
   if(role==='admin') return 'all';
   if(role==='finance') return 'dashboard,finance,paymentsQuery';
-  if(role==='attendance') return 'dashboard,qrAttendance,absences';
   return 'dashboard';
 }
 function supervisors(){
@@ -599,7 +528,7 @@ function supervisors(){
       <div class="field"><label>اسم المشرف</label><input id="uDisplay" placeholder="مثال: مشرف الحضور"></div>
       <div class="field"><label>اسم المستخدم للدخول</label><input id="uName" placeholder="مثال: coach1"></div>
       <div class="field"><label>كلمة المرور</label><input id="uPass" placeholder="كلمة مرور سهلة للمشرف"></div>
-      <div class="field"><label>نوع الحساب</label><select id="uRole"><option value="custom">مشرف مخصص</option><option value="finance">مالية</option><option value="attendance">تفقد وغياب</option><option value="admin">مدير عام</option></select></div>
+      <div class="field"><label>نوع الحساب</label><select id="uRole"><option value="custom">مشرف مخصص</option><option value="finance">مالية</option><option value="admin">مدير عام</option></select></div>
       <div class="field full"><label>تحديد الصلاحيات التي ستظهر للمشرف</label><div class="permissions-grid" id="permBox">${perms}</div></div>
       <button class="btn btn-gold full" type="submit"><i class="fa-solid fa-floppy-disk"></i> حفظ المشرف والصلاحيات</button>
     </form></div>
@@ -616,19 +545,11 @@ function applyRolePerms(role){
 function selectedPerms(){ return [...document.querySelectorAll('#permBox input:checked')].map(x=>x.value).join(','); }
 async function saveUser(e){
   e.preventDefault();
-  const ctx = showBusy('جاري حفظ المشرف...', e.submitter);
   const role = $('uRole').value;
   const payload = { username:$('uName').value.trim(), password:$('uPass').value.trim(), displayName:$('uDisplay').value.trim() || $('uName').value.trim(), role, permissions: role==='admin' ? 'all' : selectedPerms(), active:'1' };
-  if(!payload.username || !payload.password){ toast('اسم المستخدم وكلمة المرور مطلوبان','error'); hideBusy(ctx); return; }
-  try{
-    const serverUser = await api('/api/users',{method:'POST', body:JSON.stringify(payload), silent:true});
-    const user = (serverUser && !serverUser.__pending && serverUser.username) ? serverUser : Object.assign({}, payload, { createdAt: nowAr() });
-    DB.users = DB.users.filter(u => String(u.username) !== String(user.username));
-    DB.users.push(user);
-    toast('تم إنشاء المشرف بنجاح','success'); supervisors(); refreshDataSilent();
-  }
+  if(!payload.username || !payload.password) return toast('اسم المستخدم وكلمة المرور مطلوبان','error');
+  try{ await api('/api/users',{method:'POST', body:JSON.stringify(payload)}); await loadData(); toast('تم إنشاء المشرف بنجاح','success'); supervisors(); }
   catch(err){ toast(err.message,'error'); }
-  finally{ hideBusy(ctx); }
 }
 function renderUsersTable(){
   const rows = userList();
@@ -636,14 +557,8 @@ function renderUsersTable(){
 }
 async function deleteUser(username){
   if(!confirm('هل تريد حذف هذا الحساب؟')) return;
-  const ctx = showBusy('جاري الحذف...');
-  try{
-    await api(`/api/users/${encodeURIComponent(username)}`, {method:'DELETE', silent:true});
-    DB.users = DB.users.filter(u => String(u.username) !== String(username));
-    renderUsersTable(); toast('تم حذف الحساب','success'); refreshDataSilent();
-  }
+  try{ await api(`/api/users/${encodeURIComponent(username)}`, {method:'DELETE'}); await loadData(); renderUsersTable(); toast('تم حذف الحساب','success'); }
   catch(err){ toast(err.message,'error'); }
-  finally{ hideBusy(ctx); }
 }
 function settings(){
   const s = DB.settings;
@@ -652,16 +567,11 @@ function settings(){
 }
 async function saveSettings(e){
   e.preventDefault();
-  const ctx = showBusy('جاري حفظ الإعدادات...', e.submitter);
-  try{
-    const logo = await fileToBase64($('sLogo').files[0]);
-    const payload = { academyName:$('sName').value, academyEn:$('sEn').value, description:$('sDesc').value, address:$('sAddress').value, defaultFee:$('sFee').value };
-    if(logo) payload.logo = logo;
-    const settingsRes = await api('/api/settings', { method:'PUT', body:JSON.stringify(payload), silent:true });
-    DB.settings = (settingsRes && !settingsRes.__pending) ? settingsRes : Object.assign(DB.settings, payload);
-    toast('تم حفظ الإعدادات داخل Google Sheets','success'); openApp(); refreshDataSilent();
-  }catch(err){ toast(err.message || 'تعذر حفظ الإعدادات','error'); }
-  finally{ hideBusy(ctx); }
+  const logo = await fileToBase64($('sLogo').files[0]);
+  const payload = { academyName:$('sName').value, academyEn:$('sEn').value, description:$('sDesc').value, address:$('sAddress').value, defaultFee:$('sFee').value };
+  if(logo) payload.logo = logo;
+  await api('/api/settings', { method:'PUT', body:JSON.stringify(payload) });
+  await loadData(); toast('تم حفظ الإعدادات داخل Google Sheets','success'); openApp();
 }
 
 function openModal(html){ $('modalContent').innerHTML = html; $('modal').classList.remove('hidden'); }
