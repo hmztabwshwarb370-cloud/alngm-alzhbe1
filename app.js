@@ -16,6 +16,81 @@ function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('ر�
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const uid = p => `${p}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
 
+/* ===== Loading buttons + faster navigation patch ===== */
+let __activeActionButton = null;
+let __activeActionStartedAt = 0;
+
+function injectLoadingButtonStyles(){
+  if(document.getElementById('gs-loading-button-style')) return;
+  const style = document.createElement('style');
+  style.id = 'gs-loading-button-style';
+  style.textContent = `
+    .btn.is-loading, button.is-loading {
+      opacity: .86 !important;
+      cursor: wait !important;
+      pointer-events: none !important;
+      position: relative;
+    }
+    .btn.is-loading .gs-spinner, button.is-loading .gs-spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(7,17,31,.25);
+      border-top-color: #07111f;
+      border-radius: 50%;
+      display: inline-block;
+      animation: gsSpin .75s linear infinite;
+      vertical-align: middle;
+      margin-inline-end: 6px;
+    }
+    @keyframes gsSpin { to { transform: rotate(360deg); } }
+  `;
+  document.head.appendChild(style);
+}
+
+function setButtonLoading(btn, text='جاري العمل...'){
+  if(!btn || btn.dataset.gsLoading === '1') return;
+  injectLoadingButtonStyles();
+  btn.dataset.gsLoading = '1';
+  btn.dataset.gsOriginalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add('is-loading');
+  btn.innerHTML = `<span class="gs-spinner"></span>${text}`;
+}
+
+function resetButtonLoading(btn){
+  if(!btn || btn.dataset.gsLoading !== '1') return;
+  btn.disabled = false;
+  btn.classList.remove('is-loading');
+  btn.innerHTML = btn.dataset.gsOriginalHtml || btn.innerHTML;
+  delete btn.dataset.gsLoading;
+  delete btn.dataset.gsOriginalHtml;
+}
+
+function rememberActionButton(btn){
+  if(!btn) return;
+  __activeActionButton = btn;
+  __activeActionStartedAt = Date.now();
+}
+
+function takeRecentActionButton(){
+  if(!__activeActionButton) return null;
+  if(Date.now() - __activeActionStartedAt > 2500) return null;
+  return __activeActionButton;
+}
+
+document.addEventListener('click', function(e){
+  const btn = e.target.closest('button, .btn');
+  if(btn && !btn.classList.contains('menu-item') && !btn.classList.contains('no-loading')){
+    rememberActionButton(btn);
+  }
+}, true);
+
+document.addEventListener('submit', function(e){
+  const btn = e.submitter || e.target.querySelector('button[type="submit"], .btn');
+  rememberActionButton(btn);
+}, true);
+
+
 const fallbackUsers = [
   { username: 'admin', password: 'admin123', role: 'admin', displayName: 'المدير العام', permissions:'all', active:'1' },
   { username: 'finance', password: 'finance123', role: 'finance', displayName: 'قسم المالية', permissions:'dashboard,finance,paymentsQuery', active:'1' },
@@ -48,12 +123,14 @@ function ensureApiUrl(){
 }
 function jsonpRequest(path){
   ensureApiUrl();
+  const __btn = takeRecentActionButton();
+  if(__btn) setButtonLoading(__btn, 'جاري العمل...');
   return new Promise((resolve, reject) => {
     const cb = 'gs_cb_' + Date.now() + '_' + Math.random().toString(16).slice(2);
     const url = API_URL + '?action=api&path=' + encodeURIComponent(path) + '&callback=' + encodeURIComponent(cb) + '&_=' + Date.now();
     const s = document.createElement('script');
     const timer = setTimeout(() => { cleanup(); reject(new Error('انتهت مهلة الاتصال بالسيرفر')); }, 30000);
-    function cleanup(){ clearTimeout(timer); delete window[cb]; if(s.parentNode) s.parentNode.removeChild(s); }
+    function cleanup(){ clearTimeout(timer); resetButtonLoading(__btn); delete window[cb]; if(s.parentNode) s.parentNode.removeChild(s); }
     window[cb] = data => { cleanup(); data && data.error ? reject(new Error(data.error)) : resolve(data || {}); };
     s.onerror = () => { cleanup(); reject(new Error('فشل الاتصال بسيرفر Apps Script')); };
     s.src = url;
@@ -62,6 +139,8 @@ function jsonpRequest(path){
 }
 function postToAppsScript(path, method, payload){
   ensureApiUrl();
+  const __btn = takeRecentActionButton();
+  if(__btn) setButtonLoading(__btn, 'جاري العمل...');
   return new Promise((resolve, reject) => {
     const requestId = 'req_' + Date.now() + '_' + Math.random().toString(16).slice(2);
     const iframeName = 'iframe_' + requestId;
@@ -80,7 +159,7 @@ function postToAppsScript(path, method, payload){
       form.appendChild(input);
     });
     const timer = setTimeout(() => { cleanup(); reject(new Error('انتهت مهلة حفظ البيانات في السيرفر')); }, 60000);
-    function cleanup(){ clearTimeout(timer); window.removeEventListener('message', onMessage); setTimeout(()=>{ iframe.remove(); form.remove(); }, 50); }
+    function cleanup(){ clearTimeout(timer); resetButtonLoading(__btn); window.removeEventListener('message', onMessage); setTimeout(()=>{ iframe.remove(); form.remove(); }, 50); }
     function onMessage(e){
       const data = e.data || {};
       if(!data || data.requestId !== requestId) return;
@@ -145,6 +224,9 @@ function renderLoginBrand(){
   $('loginLogoBox').innerHTML = logoHtml();
 }
 function login(){
+  const btn = $('loginBtn');
+  setButtonLoading(btn, 'جاري الدخول...');
+  setTimeout(()=>resetButtonLoading(btn), 350);
   const u = $('loginUser').value.trim(); const p = $('loginPass').value.trim();
   const found = userList().find(x => String(x.username) === u && String(x.password) === p && isActiveUser(x));
   if(!found){ $('loginError').textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة أو الحساب غير مفعل'; return; }
@@ -174,7 +256,7 @@ function renderMenu(){
   document.querySelectorAll('.menu-item').forEach(btn => btn.onclick = () => navigate(btn.dataset.page));
 }
 async function navigate(page){
-  stopScanner(); await loadData();
+  stopScanner(); if(!DB) await loadData();
   if(!canAccess(page)){
     const first = menuItems.find(m => m.roles.includes(currentUser.role) || userPerms(currentUser).includes(m.id));
     page = first?.id || 'dashboard';
