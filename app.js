@@ -5,12 +5,16 @@ let currentUser = null;
 let currentPage = 'dashboard';
 let qrScanner = null;
 let DB = null;
+const REMOVED_PAGES = new Set(['qrAttendance','absences']);
 
 const $ = id => document.getElementById(id);
 const today = () => new Date().toISOString().slice(0, 10);
 const nowAr = () => new Date().toLocaleString('ar-SY');
 const money = n => `${Number(n || 0).toLocaleString('ar-SY')} ل.س`;
 const defaultFee = () => Number(DB?.settings?.defaultFee || 0);
+const busFee = () => Number(DB?.settings?.busFee || 200000);
+const kitFee = () => Number(DB?.settings?.kitFee || 100000);
+const num = v => Number(v || 0);
 function normalizePhone(phone){ let p = String(phone||'').replace(/[^0-9]/g,''); if(p.startsWith('00')) p = p.slice(2); if(p.startsWith('0')) p = '963' + p.slice(1); return p; }
 function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('رقم ولي الأمر غير موجود','error'); return; } window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`,'_blank'); }
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -75,6 +79,31 @@ function findPlayerByNameOrId(value){
   return DB.players.find(p => String(p.id)===q || String(p.name)===q) || DB.players.find(p => String(p.name||'').includes(q));
 }
 
+function paymentMainPaid(p){ return num(p.mainAmount !== undefined && p.mainAmount !== '' ? p.mainAmount : p.amount); }
+function paymentBusIncluded(p){ return String(p.busIncluded || '').toLowerCase() === 'true' || String(p.busIncluded) === '1' || num(p.busAmount) > 0; }
+function paymentKitIncluded(p){ return String(p.kitIncluded || '').toLowerCase() === 'true' || String(p.kitIncluded) === '1' || num(p.kitAmount) > 0; }
+function paymentTotalPaid(p){
+  if(p.mainAmount !== undefined || p.busAmount !== undefined || p.kitAmount !== undefined){
+    return paymentMainPaid(p) + num(p.busAmount) + num(p.kitAmount);
+  }
+  return num(p.amount);
+}
+function paymentExtrasText(p){
+  const parts = [];
+  if(paymentBusIncluded(p)) parts.push(`باص: ${money(num(p.busAmount))}`);
+  if(paymentKitIncluded(p)) parts.push(`طقم: ${money(num(p.kitAmount))}`);
+  return parts.length ? parts.join(' / ') : 'لا يوجد';
+}
+function extrasNames(finance){
+  const parts = [];
+  if(finance.busSubscribed) parts.push('باص');
+  if(finance.kitSubscribed) parts.push('طقم رياضي');
+  return parts.length ? parts.join(' + ') : 'لا يوجد';
+}
+function playerOutstandingList(){
+  return (DB.players || []).map(player => ({ player, finance:getPlayerFinance(player) })).filter(x => x.finance.totalRemaining > 0);
+}
+
 const fallbackUsers = [
   { username: 'admin', password: 'admin123', role: 'admin', displayName: 'المدير العام', permissions:'all', active:'1' },
   { username: 'finance', password: 'finance123', role: 'finance', displayName: 'قسم المالية', permissions:'dashboard,finance,paymentsQuery', active:'1' }
@@ -100,6 +129,7 @@ function userList(){ return (DB?.users?.length ? DB.users : fallbackUsers).map(u
 function userPerms(u){ return String(u?.permissions || '').split(',').map(x=>x.trim()).filter(Boolean); }
 function isActiveUser(u){ return String(u?.active ?? '1') !== '0'; }
 function canAccess(page){
+  if(REMOVED_PAGES.has(page)) return false;
   if(!currentUser) return false;
   if(currentUser.role === 'admin' || currentUser.permissions === 'all') return true;
   return userPerms(currentUser).includes(page);
@@ -237,6 +267,7 @@ function renderMenu(){
   document.querySelectorAll('.menu-item').forEach(btn => btn.onclick = () => navigate(btn.dataset.page));
 }
 async function navigate(page){
+  if(REMOVED_PAGES.has(page)) page = 'dashboard';
   stopScanner();
   if(!canAccess(page)){
     const first = menuItems.find(m => m.roles.includes(currentUser.role) || userPerms(currentUser).includes(m.id));
@@ -253,12 +284,17 @@ async function navigate(page){
 
 function dashboard(){
   const players = DB.players.length;
-  const revenue = DB.payments.reduce((s,p)=>s+Number(p.amount||0),0);
+  const revenue = DB.payments.reduce((s,p)=>s+paymentTotalPaid(p),0);
+  const outstanding = playerOutstandingList().reduce((s,x)=>s + x.finance.totalRemaining, 0);
   const logs = DB.logs.slice(-10).reverse();
   $('content').innerHTML = `
     <div class="stats-grid">
       ${stat('fa-person-running','إجمالي اللاعبين',players,'blue')}
       ${stat('fa-wallet','إجمالي الإيرادات',money(revenue),'gold')}
+      <div class="stat-card red" onclick="showOutstandingDetails()" style="cursor:pointer" title="اضغط لعرض تفاصيل المبالغ المتبقية">
+        <div class="stat-icon"><i class="fa-solid fa-hand-holding-dollar"></i></div>
+        <div><span>المبالغ المتبقية</span><strong>${money(outstanding)}</strong></div>
+      </div>
     </div>
     <div class="panel">
       <div class="panel-head"><h3><i class="fa-solid fa-clock-rotate-left"></i> آخر الحركات</h3><button class="btn btn-gold" onclick="openDatabaseFile()"><i class="fa-solid fa-table"></i> فتح قاعدة البيانات</button></div>
@@ -266,6 +302,14 @@ function dashboard(){
         ${logs.length?logs.map(l=>`<tr><td><span class="badge">${esc(l.type)}</span></td><td>${esc(l.text)}</td><td>${esc(l.at)}</td></tr>`).join(''):'<tr><td colspan="3" class="empty">لا توجد حركات بعد</td></tr>'}
       </tbody></table></div>
     </div>`;
+}
+function showOutstandingDetails(){
+  const rows = playerOutstandingList();
+  const html = `<div class="panel" style="box-shadow:none;margin:0"><div class="panel-head"><h3><i class="fa-solid fa-hand-holding-dollar"></i> تفاصيل المبالغ المتبقية</h3><span class="badge danger">${money(rows.reduce((s,x)=>s+x.finance.totalRemaining,0))}</span></div>
+  <div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>المدفوع</th><th>الاشتراكات الإضافية</th><th>المتبقي</th><th>إشعار</th></tr></thead><tbody>
+  ${rows.length?rows.map(({player, finance})=>`<tr><td>${esc(player.name)}</td><td>${money(finance.totalPaid)}</td><td>${esc(extrasNames(finance))}</td><td><b>${money(finance.totalRemaining)}</b><br><small>${esc(finance.breakdownText)}</small></td><td><button class="btn btn-sm btn-gold" onclick="sendPaymentReminder('${player.id}','partial')"><i class="fa-brands fa-whatsapp"></i> تذكير واتساب</button></td></tr>`).join(''):'<tr><td colspan="5" class="empty">لا توجد مبالغ متبقية حالياً</td></tr>'}
+  </tbody></table></div></div>`;
+  openModal(html);
 }
 function stat(icon,title,value,color){ return `<div class="stat-card ${color}"><div class="stat-icon"><i class="fa-solid ${icon}"></i></div><div><span>${title}</span><strong>${value}</strong></div></div>`; }
 
@@ -407,55 +451,86 @@ async function handleScan(code){
 
 function finance(){
   const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
-  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اكتب اسم اللاعب بدل القائمة</span></div><form id="payForm" class="form-grid"><div class="field span-2"><label>اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div><div class="field"><label>المبلغ المدفوع</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div><div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div><div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div><button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ الدفعة</button></form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات</h3></div>${paymentsTable()}</div>`;
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اكتب اسم اللاعب بسرعة</span></div>
+    <form id="payForm" class="form-grid">
+      <div class="field span-2"><label>اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div>
+      <div class="field"><label>المدفوع من رسم الاشتراك</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div>
+      <div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div>
+      <div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div>
+      <div class="field"><label><input id="hasBus" type="checkbox"> مشترك بالباص <small>(${money(busFee())})</small></label><input id="payBusAmount" type="number" value="0" placeholder="المدفوع للباص"></div>
+      <div class="field"><label><input id="hasKit" type="checkbox"> طقم رياضي <small>(${money(kitFee())})</small></label><input id="payKitAmount" type="number" value="0" placeholder="المدفوع للطقم"></div>
+      <div class="field span-2"><div class="badge blue" id="paySummary">سيتم حساب المدفوع والمتبقي تلقائياً</div></div>
+      <button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ الدفعة</button>
+    </form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات</h3></div>${paymentsTable()}</div>`;
+  ['payAmount','payBusAmount','payKitAmount','hasBus','hasKit'].forEach(id => { const el=$(id); if(el) el.addEventListener('input', updatePaymentSummary); if(el) el.addEventListener('change', updatePaymentSummary); });
   $('payForm').onsubmit = savePayment;
+  updatePaymentSummary();
+}
+function updatePaymentSummary(){
+  if(!$('paySummary')) return;
+  const mainPaid = num($('payAmount')?.value);
+  const hasBus = !!$('hasBus')?.checked;
+  const hasKit = !!$('hasKit')?.checked;
+  const busPaid = hasBus ? num($('payBusAmount')?.value) : 0;
+  const kitPaid = hasKit ? num($('payKitAmount')?.value) : 0;
+  const due = defaultFee() + (hasBus ? busFee() : 0) + (hasKit ? kitFee() : 0);
+  const paid = mainPaid + busPaid + kitPaid;
+  $('paySummary').textContent = `الإجمالي المطلوب: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع: ${money(Math.max(due-paid,0))}`;
 }
 async function savePayment(e){
   e.preventDefault();
   const btn = currentSubmitButton(e);
   const player = findPlayerByNameOrId($('payPlayerName').value);
   if(!player) return toast('اكتب اسم لاعب صحيح من القائمة','error');
-  const amount = Number($('payAmount').value || 0);
-  if(!amount) return toast('أدخل مبلغ الدفعة','error');
+  const mainAmount = num($('payAmount').value);
+  const busIncluded = $('hasBus').checked;
+  const kitIncluded = $('hasKit').checked;
+  const busAmount = busIncluded ? num($('payBusAmount').value) : 0;
+  const kitAmount = kitIncluded ? num($('payKitAmount').value) : 0;
+  const totalPaid = mainAmount + busAmount + kitAmount;
+  if(!totalPaid) return toast('أدخل مبلغاً واحداً على الأقل','error');
   const type = $('payType').value;
   const paymentDate = $('payDate').value || today();
+  const totalDue = defaultFee() + (busIncluded ? busFee() : 0) + (kitIncluded ? kitFee() : 0);
   const localPay = {
-    id: uid('PAY'),
-    playerId: player.id,
-    playerName: player.name,
-    amount,
-    type,
-    paymentDate,
-    expireDate: calcExpireDate(paymentDate, type),
-    createdAt: nowAr(),
-    _pending: true
+    id: uid('PAY'), playerId: player.id, playerName: player.name,
+    amount: totalPaid, mainAmount, busIncluded: busIncluded ? '1' : '', busAmount,
+    kitIncluded: kitIncluded ? '1' : '', kitAmount, totalDue, totalRemaining: Math.max(totalDue-totalPaid,0),
+    type, paymentDate, expireDate: calcExpireDate(paymentDate, type), createdAt: nowAr(), _pending: true
   };
-  setBtnBusy(btn, 'جاري حفظ الدفعة...');
-  setGlobalBusy('جاري حفظ الدفعة...');
+  setBtnBusy(btn, 'جاري حفظ الدفعة...'); setGlobalBusy('جاري حفظ الدفعة...');
   try{
-    // تحديث فوري للواجهة قبل انتظار Apps Script
     DB.payments.push(localPay);
     toast('تم الحفظ وظهرت الدفعة في السجل','success');
-    $('payForm').reset(); $('payDate').value = today(); $('payAmount').value = DB.settings.defaultFee || defaultFee();
+    $('payForm').reset(); $('payDate').value = today(); $('payAmount').value = DB.settings.defaultFee || defaultFee(); updatePaymentSummary();
     finance();
-    sendReceiptWhatsApp(localPay.id);
-    // مزامنة مع Google Sheets بالخلفية بدون تعليق الواجهة
-    postFast('/api/payments', 'POST', { playerId:player.id, amount, type, paymentDate }).catch(err => toast('تنبيه: تعذر إرسال الدفعة للسيرفر، تحقق من الاتصال', 'error'));
+    postFast('/api/payments', 'POST', localPay).catch(err => toast('تنبيه: تعذر إرسال الدفعة للسيرفر، تحقق من الاتصال', 'error'));
     refreshDataInBackground(7000);
   }catch(err){ toast(err.message,'error'); }
   finally{ resetBtnBusy(btn); clearGlobalBusy(); }
 }
-function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>المبلغ</th><th>النوع</th><th>تاريخ الدفع</th><th>الانتهاء</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${money(p.amount)}</td><td>${esc(p.type)}</td><td>${esc(p.paymentDate)}</td><td>${esc(p.expireDate)}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>رسم الاشتراك</th><th>الباص</th><th>الطقم</th><th>الإجمالي المدفوع</th><th>التاريخ</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${money(paymentMainPaid(p))}</td><td>${paymentBusIncluded(p)?money(num(p.busAmount)):'-'}</td><td>${paymentKitIncluded(p)?money(num(p.kitAmount)):'-'}</td><td>${money(paymentTotalPaid(p))}</td><td>${esc(p.paymentDate)}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptSms('${p.id}')"><i class="fa-solid fa-message"></i> رسالة نصية</button></td></tr>`).join(''):'<tr><td colspan="7" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function buildReceiptMessage(p){
+  return `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nرسم الاشتراك المدفوع: ${money(paymentMainPaid(p))}\nالباص: ${paymentBusIncluded(p) ? money(num(p.busAmount)) : 'غير مشترك'}\nالطقم الرياضي: ${paymentKitIncluded(p) ? money(num(p.kitAmount)) : 'غير مشترك'}\nإجمالي المدفوع: ${money(paymentTotalPaid(p))}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${p.paymentDate}\nتاريخ الانتهاء: ${p.expireDate}\n\nشكراً لثقتكم بنا 🌟`;
+}
+function sendReceiptSms(id){
+  const p = DB.payments.find(x=>String(x.id)===String(id));
+  if(!p) return toast('لم يتم العثور على الدفعة','error');
+  const player = DB.players.find(x=>String(x.id)===String(p.playerId)) || {};
+  const phone = normalizePhone(player.phone || player.guardianPhone || '');
+  if(!phone) return toast('رقم ولي الأمر غير موجود','error');
+  const msg = buildReceiptMessage(p);
+  const sep = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? '&' : '?';
+  window.location.href = `sms:${phone}${sep}body=${encodeURIComponent(msg)}`;
+}
 function sendReceiptWhatsApp(id){
   const p = DB.payments.find(x=>String(x.id)===String(id));
   if(!p) return toast('لم يتم العثور على الدفعة','error');
   const player = DB.players.find(x=>String(x.id)===String(p.playerId)) || {};
-  const phone = player.phone || player.guardianPhone || '';
-  const msg = `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nالمبلغ المدفوع: ${money(p.amount)}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${p.paymentDate}\nتاريخ الانتهاء: ${p.expireDate}\n\nشكراً لثقتكم بنا 🌟`;
-  waLink(phone, msg);
+  waLink(player.phone || player.guardianPhone || '', buildReceiptMessage(p));
 }
-function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>المبلغ:</b> ${money(p.amount)}</p><p><b>نوع الاشتراك:</b> ${esc(p.type)}</p><p><b>تاريخ الدفع:</b> ${esc(p.paymentDate)}</p><p><b>تاريخ الانتهاء:</b> ${esc(p.expireDate)}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="printElement('receipt-${p.id}')"><i class="fa-solid fa-print"></i> طباعة الإيصال</button></div>`; }
-function printReceipt(id){ sendReceiptWhatsApp(id); }
+function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>رسم الاشتراك:</b> ${money(paymentMainPaid(p))}</p><p><b>الباص:</b> ${paymentBusIncluded(p)?money(num(p.busAmount)):'غير مشترك'}</p><p><b>الطقم:</b> ${paymentKitIncluded(p)?money(num(p.kitAmount)):'غير مشترك'}</p><p><b>الإجمالي:</b> ${money(paymentTotalPaid(p))}</p><p><b>تاريخ الدفع:</b> ${esc(p.paymentDate)}</p><p><b>تاريخ الانتهاء:</b> ${esc(p.expireDate)}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="sendReceiptSms('${p.id}')"><i class="fa-solid fa-message"></i> إرسال رسالة نصية</button></div>`; }
+function printReceipt(id){ sendReceiptSms(id); }
 
 function paymentsQuery(){
   const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
@@ -465,13 +540,26 @@ function paymentsQuery(){
 }
 function getPlayerFinance(player){
   const pays = DB.payments.filter(x=>String(x.playerId)===String(player.id)).sort((a,b)=>String(b.expireDate).localeCompare(String(a.expireDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
-  const last = pays[0];
+  const last = pays[0] || null;
   const fee = defaultFee();
-  const paid = last ? Number(last.amount || 0) : 0;
-  const remaining = Math.max(fee - paid, 0);
+  const mainPaid = pays.reduce((s,p)=>s+paymentMainPaid(p),0);
+  const busSubscribed = pays.some(paymentBusIncluded);
+  const kitSubscribed = pays.some(paymentKitIncluded);
+  const busPaid = pays.reduce((s,p)=>s+num(p.busAmount),0);
+  const kitPaid = pays.reduce((s,p)=>s+num(p.kitAmount),0);
+  const mainRemaining = Math.max(fee - mainPaid, 0);
+  const busRemaining = busSubscribed ? Math.max(busFee() - busPaid, 0) : 0;
+  const kitRemaining = kitSubscribed ? Math.max(kitFee() - kitPaid, 0) : 0;
+  const totalPaid = mainPaid + busPaid + kitPaid;
+  const totalDue = fee + (busSubscribed ? busFee() : 0) + (kitSubscribed ? kitFee() : 0);
+  const totalRemaining = mainRemaining + busRemaining + kitRemaining;
   const active = !!(last && String(last.expireDate) >= today());
-  const complete = active && remaining <= 0;
-  return { pays, last, fee, paid, remaining, active, complete };
+  const complete = active && totalRemaining <= 0;
+  const parts = [];
+  if(mainRemaining>0) parts.push(`رسم الاشتراك: ${money(mainRemaining)}`);
+  if(busRemaining>0) parts.push(`الباص: ${money(busRemaining)}`);
+  if(kitRemaining>0) parts.push(`الطقم: ${money(kitRemaining)}`);
+  return { pays, last, fee, mainPaid, busPaid, kitPaid, busSubscribed, kitSubscribed, mainRemaining, busRemaining, kitRemaining, totalPaid, totalDue, totalRemaining, remaining:totalRemaining, active, complete, breakdownText: parts.join(' / ') || 'لا يوجد مبالغ متبقية' };
 }
 function queryPayment(q){
   if(!q){ $('queryResult').innerHTML=''; return; }
@@ -480,17 +568,22 @@ function queryPayment(q){
   const f = getPlayerFinance(p);
   const statusClass = f.active ? (f.complete ? 'active' : 'partial') : 'expired';
   const statusText = f.active ? 'الاشتراك ساري' : 'الاشتراك منتهي أو لا توجد دفعات';
-  const payText = f.complete ? 'حالة الدفع: مكتمل' : (f.active ? `حالة الدفع: باقي ${money(f.remaining)}` : 'حالة الدفع: يحتاج تسديد');
-  const reminderBtn = f.active && f.remaining > 0
-    ? `<button class="btn btn-gold" onclick="sendPaymentReminder('${p.id}','partial')"><i class="fa-brands fa-whatsapp"></i> إرسال رسالة تذكير بالدفع</button>`
+  const payText = f.complete ? 'حالة الدفع: مكتمل' : `حالة الدفع: باقي ${money(f.totalRemaining)}`;
+  const reminderBtn = f.totalRemaining > 0
+    ? `<button class="btn btn-gold" onclick="sendPaymentReminder('${p.id}','partial')"><i class="fa-brands fa-whatsapp"></i> إرسال تذكير بإكمال الدفع</button>`
     : (!f.active ? `<button class="btn btn-danger" onclick="sendPaymentReminder('${p.id}','expired')"><i class="fa-brands fa-whatsapp"></i> إرسال رسالة تجديد الاشتراك</button>` : '');
   $('queryResult').innerHTML = `<div class="payment-status ${statusClass}">
     ${avatar(p,'success-photo')}
     <h2>${esc(p.name)}</h2>
     <h3>${statusText}</h3>
     <p><b>${payText}</b></p>
-    ${f.last?`<p>آخر دفعة: <b>${money(f.paid)}</b> | تاريخ الانتهاء: <b>${esc(f.last.expireDate)}</b></p>`:`<p>لا توجد أي دفعة مسجلة لهذا اللاعب.</p>`}
-    ${f.fee?`<p>قيمة الاشتراك المعتمدة: <b>${money(f.fee)}</b></p>`:''}
+    <div class="table-wrap" style="margin-top:12px"><table><tbody>
+      <tr><th>رسم الاشتراك</th><td>مدفوع: ${money(f.mainPaid)} / متبقي: ${money(f.mainRemaining)}</td></tr>
+      <tr><th>الباص</th><td>${f.busSubscribed ? `مدفوع: ${money(f.busPaid)} / متبقي: ${money(f.busRemaining)}` : 'غير مشترك'}</td></tr>
+      <tr><th>الطقم الرياضي</th><td>${f.kitSubscribed ? `مدفوع: ${money(f.kitPaid)} / متبقي: ${money(f.kitRemaining)}` : 'غير مشترك'}</td></tr>
+      <tr><th>الإجمالي</th><td>مدفوع: ${money(f.totalPaid)} / متبقي: <b>${money(f.totalRemaining)}</b></td></tr>
+    </tbody></table></div>
+    ${f.last?`<p>آخر دفعة: <b>${money(paymentTotalPaid(f.last))}</b> | تاريخ الانتهاء: <b>${esc(f.last.expireDate)}</b></p>`:`<p>لا توجد أي دفعة مسجلة لهذا اللاعب.</p>`}
     <div class="actions-row center-actions">${reminderBtn}</div>
   </div>`;
 }
@@ -498,9 +591,9 @@ function sendPaymentReminder(id, type){
   const p = DB.players.find(x=>x.id===id);
   if(!p) return;
   const f = getPlayerFinance(p);
-  const msg = type === 'partial'
-    ? `تحية طيبة من إدارة ${DB.settings.academyName}. نذكّركم بأن اشتراك البطل ${p.name} ساري، ويوجد مبلغ متبقٍ قدره ${money(f.remaining)}. نرجو تسديد المبلغ لاستكمال ملفه المالي، ونتمنى له دوام التألق والنجاح.`
-    : `تحية طيبة من إدارة ${DB.settings.academyName}. نود إعلامكم بأن اشتراك البطل ${p.name} منتهٍ ويحتاج إلى تجديد للاستمرار في التدريب. بانتظاركم ليستمر بطلنا بخطواته نحو التميز والنجمة الذهبية.`;
+  const msg = f.totalRemaining > 0
+    ? `تحية طيبة من إدارة ${DB.settings.academyName}. نذكّركم بأن اللاعب ${p.name} لديه مبلغ متبقٍ قدره ${money(f.totalRemaining)}. التفاصيل: ${f.breakdownText}. نرجو إكمال الدفع، ونتمنى له دوام التميز والنجاح.`
+    : `تحية طيبة من إدارة ${DB.settings.academyName}. نود إعلامكم بأن اشتراك البطل ${p.name} يحتاج إلى متابعة وتجديد للاستمرار في التدريب. بانتظاركم ليستمر بطلنا بخطواته نحو التميز.`;
   waLink(p.phone, msg);
 }
 
@@ -562,16 +655,21 @@ async function deleteUser(username){
 }
 function settings(){
   const s = DB.settings;
-  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-gear"></i> إعدادات المؤسسة</h3></div><form id="settingsForm" class="form-grid"><div class="field"><label>اسم الأكاديمية</label><input id="sName" value="${esc(s.academyName)}"></div><div class="field"><label>الاسم الإنجليزي</label><input id="sEn" value="${esc(s.academyEn)}"></div><div class="field span-2"><label>الوصف</label><input id="sDesc" value="${esc(s.description)}"></div><div class="field span-2"><label>العنوان</label><input id="sAddress" value="${esc(s.address)}"></div><div class="field"><label>قيمة الاشتراك الافتراضية</label><input id="sFee" type="number" value="${esc(s.defaultFee)}"></div><div class="field"><label>تغيير الشعار</label><input id="sLogo" type="file" accept="image/*"></div><button class="btn btn-gold span-2" type="submit"><i class="fa-solid fa-floppy-disk"></i> حفظ الإعدادات داخل Google Sheets</button></form></div>`;
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-gear"></i> إعدادات المؤسسة</h3></div><form id="settingsForm" class="form-grid"><div class="field"><label>اسم الأكاديمية</label><input id="sName" value="${esc(s.academyName)}"></div><div class="field"><label>الاسم الإنجليزي</label><input id="sEn" value="${esc(s.academyEn)}"></div><div class="field span-2"><label>الوصف</label><input id="sDesc" value="${esc(s.description)}"></div><div class="field span-2"><label>العنوان</label><input id="sAddress" value="${esc(s.address)}"></div><div class="field"><label>قيمة الاشتراك الافتراضية</label><input id="sFee" type="number" value="${esc(s.defaultFee)}"></div><div class="field"><label>رسم الباص</label><input id="sBusFee" type="number" value="${esc(s.busFee || 200000)}" placeholder="200000"></div><div class="field"><label>سعر الطقم الرياضي</label><input id="sKitFee" type="number" value="${esc(s.kitFee || 100000)}" placeholder="100000"></div><div class="field"><label>تغيير الشعار</label><input id="sLogo" type="file" accept="image/*"></div><button class="btn btn-gold span-2" type="submit"><i class="fa-solid fa-floppy-disk"></i> حفظ الإعدادات داخل Google Sheets</button></form></div>`;
   $('settingsForm').onsubmit = saveSettings;
 }
 async function saveSettings(e){
   e.preventDefault();
-  const logo = await fileToBase64($('sLogo').files[0]);
-  const payload = { academyName:$('sName').value, academyEn:$('sEn').value, description:$('sDesc').value, address:$('sAddress').value, defaultFee:$('sFee').value };
-  if(logo) payload.logo = logo;
-  await api('/api/settings', { method:'PUT', body:JSON.stringify(payload) });
-  await loadData(); toast('تم حفظ الإعدادات داخل Google Sheets','success'); openApp();
+  const btn = currentSubmitButton(e);
+  setBtnBusy(btn, 'جاري حفظ الإعدادات...'); setGlobalBusy('جاري حفظ الإعدادات...');
+  try{
+    const logo = await fileToBase64($('sLogo').files[0]);
+    const payload = { academyName:$('sName').value, academyEn:$('sEn').value, description:$('sDesc').value, address:$('sAddress').value, defaultFee:$('sFee').value, busFee:$('sBusFee').value, kitFee:$('sKitFee').value };
+    if(logo) payload.logo = logo;
+    await api('/api/settings', { method:'PUT', body:JSON.stringify(payload) });
+    await loadData(); toast('تم حفظ الإعدادات داخل Google Sheets','success'); openApp();
+  }catch(err){ toast(err.message,'error'); }
+  finally{ resetBtnBusy(btn); clearGlobalBusy(); }
 }
 
 function openModal(html){ $('modalContent').innerHTML = html; $('modal').classList.remove('hidden'); }
