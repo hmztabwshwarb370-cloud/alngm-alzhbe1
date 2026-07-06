@@ -371,11 +371,34 @@ async function savePlayer(e){
 function renderPlayersTable(){
   const q = ($('playerSearch')?.value || '').trim();
   const list = DB.players.filter(p => !q || String(p.name).includes(q) || String(p.category).includes(q) || String(p.phone).includes(q));
-  $('playersTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="checkAllPlayers"></th><th>الصورة</th><th>الاسم</th><th>العمر</th><th>الفئة</th><th>ولي الأمر</th><th>تاريخ التسجيل</th><th>بطاقة</th></tr></thead><tbody>
-    ${list.length?list.map(p=>`<tr><td><input class="player-check" type="checkbox" value="${esc(p.id)}"></td><td>${avatar(p)}</td><td>${esc(p.name)}</td><td>${esc(p.age)}</td><td>${esc(p.category)}</td><td>${esc(p.phone)}</td><td>${esc(p.registerDate)}</td><td><button class="btn btn-sm btn-gold" onclick="showCard('${p.id}')"><i class="fa-solid fa-id-card"></i> عرض/طباعة</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">لا يوجد لاعبون</td></tr>'}
+  $('playersTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="checkAllPlayers"></th><th>الصورة</th><th>الاسم</th><th>العمر</th><th>الفئة</th><th>ولي الأمر</th><th>تاريخ التسجيل</th><th>بطاقة</th><th>حذف</th></tr></thead><tbody>
+    ${list.length?list.map(p=>`<tr><td><input class="player-check" type="checkbox" value="${esc(p.id)}"></td><td>${avatar(p)}</td><td>${esc(p.name)}</td><td>${esc(p.age)}</td><td>${esc(p.category)}</td><td>${esc(p.phone)}</td><td>${esc(p.registerDate)}</td><td><button class="btn btn-sm btn-gold" onclick="showCard('${p.id}')"><i class="fa-solid fa-id-card"></i> عرض/طباعة</button></td><td><button class="btn btn-sm btn-danger" onclick="deletePlayer('${p.id}', this)"><i class="fa-solid fa-trash"></i> حذف</button></td></tr>`).join(''):'<tr><td colspan="9" class="empty">لا يوجد لاعبون</td></tr>'}
   </tbody></table></div>`;
   const all = $('checkAllPlayers');
   if(all) all.onchange = () => document.querySelectorAll('.player-check').forEach(c => c.checked = all.checked);
+}
+async function deletePlayer(id, btn){
+  const player = DB.players.find(p => String(p.id) === String(id));
+  if(!player) return toast('لم يتم العثور على اللاعب','error');
+  const msg = `هل تريد حذف اللاعب ${player.name}؟\nسيتم حذف اللاعب من السجل. إذا كان لديه دفعات مسجلة فسيتم حذفها أيضاً من قاعدة البيانات لتجنب بقاء سجلات خاطئة.`;
+  if(!confirm(msg)) return;
+  setBtnBusy(btn, 'جاري حذف اللاعب...');
+  setGlobalBusy('جاري حذف اللاعب...');
+  try{
+    DB.players = DB.players.filter(p => String(p.id) !== String(id));
+    DB.payments = (DB.payments || []).filter(p => String(p.playerId) !== String(id));
+    DB.attendance = (DB.attendance || []).filter(a => String(a.playerId) !== String(id));
+    renderPlayersTable();
+    toast('تم حذف اللاعب من الواجهة، وتجري المزامنة مع Google Sheets','success');
+    postFast(`/api/players/${encodeURIComponent(id)}`, 'DELETE', {}).catch(err => toast('تنبيه: تعذر حذف اللاعب من السيرفر، تحقق من الاتصال','error'));
+    refreshDataInBackground(6000);
+    if(currentPage === 'dashboard') dashboard();
+  }catch(err){
+    toast(err.message || 'حدث خطأ أثناء حذف اللاعب','error');
+  }finally{
+    resetBtnBusy(btn);
+    clearGlobalBusy();
+  }
 }
 function playerCard(p, withPrint=false){
   return `<div class="id-card-print" id="card-${esc(p.id)}">
