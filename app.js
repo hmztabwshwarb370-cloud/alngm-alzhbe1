@@ -10,11 +10,21 @@ const REMOVED_PAGES = new Set(['qrAttendance','absences']);
 const $ = id => document.getElementById(id);
 const today = () => new Date().toISOString().slice(0, 10);
 const nowAr = () => new Date().toLocaleString('ar-SY');
-const money = n => `${Number(n || 0).toLocaleString('ar-SY')} ل.س`;
-const defaultFee = () => Number(DB?.settings?.defaultFee || 0);
-const busFee = () => Number(DB?.settings?.busFee || 200000);
-const kitFee = () => Number(DB?.settings?.kitFee || 100000);
-const num = v => Number(v || 0);
+function num(v){
+  if(v === null || v === undefined || v === '') return 0;
+  if(typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v).trim();
+  const ar = '٠١٢٣٤٥٦٧٨٩';
+  const fa = '۰۱۲۳۴۵۶۷۸۹';
+  s = s.replace(/[٠-٩]/g, d => String(ar.indexOf(d))).replace(/[۰-۹]/g, d => String(fa.indexOf(d)));
+  s = s.replace(/[,،\s]/g, '').replace(/[^0-9.\-]/g, '');
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
+const money = n => `${num(n).toLocaleString('ar-SY')} ل.س`;
+const defaultFee = () => num(DB?.settings?.defaultFee || 0);
+const busFee = () => num(DB?.settings?.busFee || 200000);
+const kitFee = () => num(DB?.settings?.kitFee || 100000);
 function normalizePhone(phone){ let p = String(phone||'').replace(/[^0-9]/g,''); if(p.startsWith('00')) p = p.slice(2); if(p.startsWith('0')) p = '963' + p.slice(1); return p; }
 function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('رقم ولي الأمر غير موجود','error'); return; } window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`,'_blank'); }
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -98,19 +108,47 @@ function findPlayerByNameOrId(value){
   return DB.players.find(p => String(p.id)===q || String(p.name)===q) || DB.players.find(p => String(p.name||'').includes(q));
 }
 
-function paymentMainPaid(p){ return num(p.mainAmount !== undefined && p.mainAmount !== '' ? p.mainAmount : p.amount); }
-function paymentBusIncluded(p){ return String(p.busIncluded || '').toLowerCase() === 'true' || String(p.busIncluded) === '1' || num(p.busAmount) > 0; }
-function paymentKitIncluded(p){ return String(p.kitIncluded || '').toLowerCase() === 'true' || String(p.kitIncluded) === '1' || num(p.kitAmount) > 0; }
+function paymentModeOf(p){ return String(p.paymentMode || '').trim(); }
+function paymentTargetOf(p){
+  const t = String(p.paymentTarget || '').trim();
+  if(t === 'bus' || t === 'kit' || t === 'main') return t;
+  return 'new';
+}
+function rawPaymentAmount(p){ return num(p.amount); }
+function paymentMainPaid(p){
+  const target = paymentTargetOf(p);
+  const mode = paymentModeOf(p);
+  if(mode === 'installment' && target === 'main') return rawPaymentAmount(p) || num(p.mainAmount);
+  if(target === 'bus' || target === 'kit') return 0;
+  return num(p.mainAmount !== undefined && p.mainAmount !== '' ? p.mainAmount : p.amount);
+}
+function paymentBusPaid(p){
+  const target = paymentTargetOf(p);
+  const mode = paymentModeOf(p);
+  if(mode === 'installment' && target === 'bus') return rawPaymentAmount(p) || num(p.busAmount);
+  return num(p.busAmount);
+}
+function paymentKitPaid(p){
+  const target = paymentTargetOf(p);
+  const mode = paymentModeOf(p);
+  if(mode === 'installment' && target === 'kit') return rawPaymentAmount(p) || num(p.kitAmount);
+  return num(p.kitAmount);
+}
+function paymentBusIncluded(p){
+  return paymentTargetOf(p) === 'bus' || String(p.busIncluded || '').toLowerCase() === 'true' || String(p.busIncluded) === '1' || paymentBusPaid(p) > 0;
+}
+function paymentKitIncluded(p){
+  return paymentTargetOf(p) === 'kit' || String(p.kitIncluded || '').toLowerCase() === 'true' || String(p.kitIncluded) === '1' || paymentKitPaid(p) > 0;
+}
 function paymentTotalPaid(p){
-  if(p.mainAmount !== undefined || p.busAmount !== undefined || p.kitAmount !== undefined){
-    return paymentMainPaid(p) + num(p.busAmount) + num(p.kitAmount);
-  }
-  return num(p.amount);
+  const detailed = paymentMainPaid(p) + paymentBusPaid(p) + paymentKitPaid(p);
+  const amount = rawPaymentAmount(p);
+  return Math.max(detailed, amount, 0);
 }
 function paymentExtrasText(p){
   const parts = [];
-  if(paymentBusIncluded(p)) parts.push(`باص: ${money(num(p.busAmount))}`);
-  if(paymentKitIncluded(p)) parts.push(`طقم: ${money(num(p.kitAmount))}`);
+  if(paymentBusIncluded(p)) parts.push(`باص: ${money(paymentBusPaid(p))}`);
+  if(paymentKitIncluded(p)) parts.push(`طقم: ${money(paymentKitPaid(p))}`);
   return parts.length ? parts.join(' / ') : 'لا يوجد';
 }
 function extrasNames(finance){
@@ -121,6 +159,9 @@ function extrasNames(finance){
 }
 function playerOutstandingList(){
   return (DB.players || []).map(player => ({ player, finance:getPlayerFinance(player) })).filter(x => x.finance.totalRemaining > 0);
+}
+function totalRevenue(){
+  return (DB.payments || []).reduce((sum, p) => sum + paymentTotalPaid(p), 0);
 }
 
 const fallbackUsers = [
@@ -303,7 +344,7 @@ async function navigate(page){
 
 function dashboard(){
   const players = DB.players.length;
-  const revenue = DB.payments.reduce((s,p)=>s+paymentTotalPaid(p),0);
+  const revenue = totalRevenue();
   const outstanding = playerOutstandingList().reduce((s,x)=>s + x.finance.totalRemaining, 0);
   const logs = DB.logs.slice(-10).reverse();
   $('content').innerHTML = `
@@ -380,26 +421,59 @@ function renderPlayersTable(){
 async function deletePlayer(id, btn){
   const player = DB.players.find(p => String(p.id) === String(id));
   if(!player) return toast('لم يتم العثور على اللاعب','error');
-  const msg = `هل تريد حذف اللاعب ${player.name}؟\nسيتم حذف اللاعب من السجل. إذا كان لديه دفعات مسجلة فسيتم حذفها أيضاً من قاعدة البيانات لتجنب بقاء سجلات خاطئة.`;
+
+  const msg = `هل تريد حذف اللاعب ${player.name}؟
+سيتم حذف اللاعب وجميع دفعاته المرتبطة به من قاعدة البيانات.`;
   if(!confirm(msg)) return;
+
   setBtnBusy(btn, 'جاري حذف اللاعب...');
-  setGlobalBusy('جاري حذف اللاعب...');
+  setGlobalBusy('جاري حذف اللاعب ودفعاته...');
+
+  const oldPlayers = [...(DB.players || [])];
+  const oldPayments = [...(DB.payments || [])];
+  const oldAttendance = [...(DB.attendance || [])];
+
   try{
-    DB.players = DB.players.filter(p => String(p.id) !== String(id));
-    DB.payments = (DB.payments || []).filter(p => String(p.playerId) !== String(id));
-    DB.attendance = (DB.attendance || []).filter(a => String(a.playerId) !== String(id));
+    // حذف فوري من الواجهة
+    DB.players = (DB.players || []).filter(p => String(p.id) !== String(id));
+    DB.payments = (DB.payments || []).filter(p =>
+      String(p.playerId) !== String(id) &&
+      String(p.playerName || '').trim() !== String(player.name || '').trim()
+    );
+    DB.attendance = (DB.attendance || []).filter(a =>
+      String(a.playerId) !== String(id) &&
+      String(a.playerName || '').trim() !== String(player.name || '').trim()
+    );
+
     renderPlayersTable();
-    toast('تم حذف اللاعب من الواجهة، وتجري المزامنة مع Google Sheets','success');
-    postFast(`/api/players/${encodeURIComponent(id)}`, 'DELETE', {}).catch(err => toast('تنبيه: تعذر حذف اللاعب من السيرفر، تحقق من الاتصال','error'));
-    refreshDataInBackground(6000);
     if(currentPage === 'dashboard') dashboard();
+    if(currentPage === 'finance') finance();
+
+    // حذف فعلي من Google Sheets وانتظار الرد حتى نتأكد أنه لم يبقَ دفعات
+    await api(`/api/players/${encodeURIComponent(id)}`, { method:'DELETE' });
+
+    // مزامنة سريعة بعد الحذف
+    try{
+      await loadData();
+      if(currentPage === 'players') renderPlayersTable();
+      if(currentPage === 'dashboard') dashboard();
+      if(currentPage === 'finance') finance();
+    }catch(e){}
+
+    toast('تم حذف اللاعب وجميع دفعاته بنجاح','success');
   }catch(err){
-    toast(err.message || 'حدث خطأ أثناء حذف اللاعب','error');
+    // رجوع للبيانات القديمة إذا فشل السيرفر
+    DB.players = oldPlayers;
+    DB.payments = oldPayments;
+    DB.attendance = oldAttendance;
+    renderPlayersTable();
+    toast(err.message || 'تعذر حذف اللاعب من السيرفر','error');
   }finally{
     resetBtnBusy(btn);
     clearGlobalBusy();
   }
 }
+
 function playerCard(p, withPrint=false){
   return `<div class="id-card-print" id="card-${esc(p.id)}">
     <div class="id-bg-navy"></div><div class="id-bg-gold"></div><div class="id-net"></div>
@@ -492,24 +566,63 @@ async function handleScan(code){
 }
 
 function finance(){
-  const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
-  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اكتب اسم اللاعب بسرعة</span></div>
+  const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category || '')}</option>`).join('');
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اسم اللاعب ← اشتراك جديد أو إكمال أقساط</span></div>
     <form id="payForm" class="form-grid">
-      <div class="field span-2"><label>اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div>
-      <div class="field"><label>المدفوع من رسم الاشتراك</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div>
+      <div class="field span-2"><label>1) اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off" required><datalist id="payPlayersList">${opts}</datalist></div>
+
+      <div class="field span-2"><label>2) نوع العملية</label><select id="payMode"><option value="new">اشتراك جديد</option><option value="installment">إكمال أقساط</option></select></div>
       <div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div>
       <div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div>
-      <div class="field"><label><input id="hasBus" type="checkbox"> مشترك بالباص <small>(${money(busFee())})</small></label><input id="payBusAmount" type="number" value="0" placeholder="المدفوع للباص"></div>
-      <div class="field"><label><input id="hasKit" type="checkbox"> طقم رياضي <small>(${money(kitFee())})</small></label><input id="payKitAmount" type="number" value="0" placeholder="المدفوع للطقم"></div>
+
+      <div id="newSubscriptionBox" class="span-2 form-grid" style="display:contents">
+        <div class="field"><label>المدفوع من رسم الاشتراك</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee || defaultFee())}"></div>
+        <div class="field"><label><input id="hasBus" type="checkbox"> إضافة اشتراك باص <small>(${money(busFee())})</small></label><input id="payBusAmount" type="number" value="0" placeholder="المدفوع من الباص"></div>
+        <div class="field"><label><input id="hasKit" type="checkbox"> إضافة طقم رياضي <small>(${money(kitFee())})</small></label><input id="payKitAmount" type="number" value="0" placeholder="المدفوع من الطقم"></div>
+      </div>
+
+      <div id="installmentBox" class="span-2 form-grid" style="display:none">
+        <div class="field"><label>3) إكمال قسط</label>
+          <select id="payTarget">
+            <option value="main">قسط الاشتراك</option>
+            <option value="bus">قسط الباص</option>
+            <option value="kit">قسط الطقم</option>
+          </select>
+        </div>
+        <div class="field"><label>قيمة الدفعة</label><input id="payInstallmentAmount" type="number" value="0" placeholder="اكتب قيمة الدفعة"></div>
+      </div>
+
       <div class="field span-2"><div class="badge blue" id="paySummary">سيتم حساب المدفوع والمتبقي تلقائياً</div></div>
       <button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ الدفعة</button>
     </form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات</h3></div>${paymentsTable()}</div>`;
-  ['payAmount','payBusAmount','payKitAmount','hasBus','hasKit'].forEach(id => { const el=$(id); if(el) el.addEventListener('input', updatePaymentSummary); if(el) el.addEventListener('change', updatePaymentSummary); });
+  ['payAmount','payBusAmount','payKitAmount','payInstallmentAmount','hasBus','hasKit','payMode','payTarget','payPlayerName'].forEach(id => { const el=$(id); if(el) el.addEventListener('input', updatePaymentSummary); if(el) el.addEventListener('change', updatePaymentSummary); });
   $('payForm').onsubmit = savePayment;
   updatePaymentSummary();
 }
+function currentPaymentPlayerFinance(){
+  const player = findPlayerByNameOrId($('payPlayerName')?.value || '');
+  return player ? getPlayerFinance(player) : null;
+}
 function updatePaymentSummary(){
   if(!$('paySummary')) return;
+  const mode = $('payMode')?.value || 'new';
+  const newBox = $('newSubscriptionBox');
+  const installmentBox = $('installmentBox');
+  if(newBox) newBox.style.display = mode === 'new' ? 'contents' : 'none';
+  if(installmentBox) installmentBox.style.display = mode === 'installment' ? 'contents' : 'none';
+
+  if(mode === 'installment'){
+    const target = $('payTarget')?.value || 'main';
+    const paid = num($('payInstallmentAmount')?.value);
+    const label = target === 'bus' ? 'قسط الباص' : (target === 'kit' ? 'قسط الطقم' : 'قسط الاشتراك');
+    const due = target === 'bus' ? busFee() : (target === 'kit' ? kitFee() : defaultFee());
+    const f = currentPaymentPlayerFinance();
+    const alreadyPaid = f ? (target === 'bus' ? f.busPaid : (target === 'kit' ? f.kitPaid : f.mainPaid)) : 0;
+    const remainingBefore = Math.max(due - alreadyPaid, 0);
+    $('paySummary').textContent = `${label} | المدفوع سابقاً: ${money(alreadyPaid)} | المتبقي قبل الدفعة: ${money(remainingBefore)} | المدفوع الآن: ${money(paid)} | المتبقي بعد الدفعة: ${money(Math.max(remainingBefore-paid,0))}`;
+    return;
+  }
+
   const mainPaid = num($('payAmount')?.value);
   const hasBus = !!$('hasBus')?.checked;
   const hasKit = !!$('hasKit')?.checked;
@@ -517,57 +630,61 @@ function updatePaymentSummary(){
   const kitPaid = hasKit ? num($('payKitAmount')?.value) : 0;
   const due = defaultFee() + (hasBus ? busFee() : 0) + (hasKit ? kitFee() : 0);
   const paid = mainPaid + busPaid + kitPaid;
-  $('paySummary').textContent = `الإجمالي المطلوب: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع: ${money(Math.max(due-paid,0))}`;
+  $('paySummary').textContent = `اشتراك جديد | الإجمالي المطلوب: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع: ${money(Math.max(due-paid,0))}`;
 }
 async function savePayment(e){
   e.preventDefault();
   const btn = currentSubmitButton(e);
   const player = findPlayerByNameOrId($('payPlayerName').value);
   if(!player) return toast('اكتب اسم لاعب صحيح من القائمة','error');
-  const mainAmount = num($('payAmount').value);
-  const busIncluded = $('hasBus').checked;
-  const kitIncluded = $('hasKit').checked;
-  const busAmount = busIncluded ? num($('payBusAmount').value) : 0;
-  const kitAmount = kitIncluded ? num($('payKitAmount').value) : 0;
-  const totalPaid = mainAmount + busAmount + kitAmount;
-  if(!totalPaid) return toast('أدخل مبلغاً واحداً على الأقل','error');
+
+  const mode = $('payMode').value || 'new';
   const type = $('payType').value;
   const paymentDate = $('payDate').value || today();
-  const totalDue = defaultFee() + (busIncluded ? busFee() : 0) + (kitIncluded ? kitFee() : 0);
+  let mainAmount = 0, busIncluded = false, kitIncluded = false, busAmount = 0, kitAmount = 0, operationLabel = 'اشتراك جديد', target = 'new';
+
+  if(mode === 'installment'){
+    target = $('payTarget').value || 'main';
+    const amount = num($('payInstallmentAmount').value);
+    if(!amount) return toast('أدخل قيمة الدفعة','error');
+    if(target === 'bus'){
+      busIncluded = true; busAmount = amount; operationLabel = 'إكمال أقساط - قسط الباص';
+    }else if(target === 'kit'){
+      kitIncluded = true; kitAmount = amount; operationLabel = 'إكمال أقساط - قسط الطقم';
+    }else{
+      mainAmount = amount; operationLabel = 'إكمال أقساط - قسط الاشتراك';
+    }
+  }else{
+    mainAmount = num($('payAmount').value);
+    busIncluded = $('hasBus').checked;
+    kitIncluded = $('hasKit').checked;
+    busAmount = busIncluded ? num($('payBusAmount').value) : 0;
+    kitAmount = kitIncluded ? num($('payKitAmount').value) : 0;
+  }
+
+  const totalPaid = mainAmount + busAmount + kitAmount;
+  if(!totalPaid) return toast('أدخل مبلغاً واحداً على الأقل','error');
+  const totalDue = mode === 'installment'
+    ? (target === 'bus' ? busFee() : (target === 'kit' ? kitFee() : defaultFee()))
+    : defaultFee() + (busIncluded ? busFee() : 0) + (kitIncluded ? kitFee() : 0);
   const localPay = {
     id: uid('PAY'), playerId: player.id, playerName: player.name,
     amount: totalPaid, mainAmount, busIncluded: busIncluded ? '1' : '', busAmount,
-    kitIncluded: kitIncluded ? '1' : '', kitAmount, totalDue, totalRemaining: Math.max(totalDue-totalPaid,0),
-    type, paymentDate, expireDate: calcExpireDate(paymentDate, type), createdAt: nowAr(), _pending: true
+    kitIncluded: kitIncluded ? '1' : '', kitAmount, totalDue, totalRemaining: 0,
+    type, paymentDate, expireDate: calcExpireDate(paymentDate, type), createdAt: nowAr(), paymentMode: mode, paymentTarget: target, operationLabel, _pending: true
   };
   setBtnBusy(btn, 'جاري حفظ الدفعة...'); setGlobalBusy('جاري حفظ الدفعة...');
   try{
     DB.payments.push(localPay);
     toast('تم الحفظ وظهرت الدفعة في السجل','success');
-    $('payForm').reset(); $('payDate').value = today(); $('payAmount').value = DB.settings.defaultFee || defaultFee(); updatePaymentSummary();
     finance();
     postFast('/api/payments', 'POST', localPay).catch(err => toast('تنبيه: تعذر إرسال الدفعة للسيرفر، تحقق من الاتصال', 'error'));
     refreshDataInBackground(7000);
   }catch(err){ toast(err.message,'error'); }
   finally{ resetBtnBusy(btn); clearGlobalBusy(); }
 }
-function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>رسم الاشتراك</th><th>الباص</th><th>الطقم</th><th>الإجمالي المدفوع</th><th>التاريخ</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${money(paymentMainPaid(p))}</td><td>${paymentBusIncluded(p)?money(num(p.busAmount)):'-'}</td><td>${paymentKitIncluded(p)?money(num(p.kitAmount)):'-'}</td><td>${money(paymentTotalPaid(p))}</td><td>${esc(displayDate(p.paymentDate))}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="7" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
-function buildReceiptMessage(p){
-  return `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nرسم الاشتراك المدفوع: ${money(paymentMainPaid(p))}\nالباص: ${paymentBusIncluded(p) ? money(num(p.busAmount)) : 'غير مشترك'}\nالطقم الرياضي: ${paymentKitIncluded(p) ? money(num(p.kitAmount)) : 'غير مشترك'}\nإجمالي المدفوع: ${money(paymentTotalPaid(p))}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${displayDate(p.paymentDate)}\nتاريخ الانتهاء: ${displayDate(p.expireDate)}\n\nشكراً لثقتكم بنا 🌟`;
-}
-function sendReceiptSms(id){
-  // توافق مع أي زر قديم: تم تحويل الإرسال من SMS إلى واتساب.
-  return sendReceiptWhatsApp(id);
-}
-function sendReceiptWhatsApp(id){
-  const p = DB.payments.find(x=>String(x.id)===String(id));
-  if(!p) return toast('لم يتم العثور على الدفعة','error');
-  const player = DB.players.find(x=>String(x.id)===String(p.playerId)) || {};
-  waLink(player.phone || player.guardianPhone || '', buildReceiptMessage(p));
-}
-function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>رسم الاشتراك:</b> ${money(paymentMainPaid(p))}</p><p><b>الباص:</b> ${paymentBusIncluded(p)?money(num(p.busAmount)):'غير مشترك'}</p><p><b>الطقم:</b> ${paymentKitIncluded(p)?money(num(p.kitAmount)):'غير مشترك'}</p><p><b>الإجمالي:</b> ${money(paymentTotalPaid(p))}</p><p><b>تاريخ الدفع:</b> ${esc(displayDate(p.paymentDate))}</p><p><b>تاريخ الانتهاء:</b> ${esc(displayDate(p.expireDate))}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> إرسال عبر واتساب</button></div>`; }
-function printReceipt(id){ sendReceiptWhatsApp(id); }
-
+function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>نوع العملية</th><th>رسم الاشتراك</th><th>الباص</th><th>الطقم</th><th>الإجمالي المدفوع</th><th>التاريخ</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${esc(p.operationLabel || paymentOperationText(p))}</td><td>${money(paymentMainPaid(p))}</td><td>${paymentBusIncluded(p)?money(paymentBusPaid(p)):'-'}</td><td>${paymentKitIncluded(p)?money(paymentKitPaid(p)):'-'}</td><td>${money(paymentTotalPaid(p))}</td><td>${esc(displayDate(p.paymentDate))}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function paymentOperationText(p){ if(String(p.paymentMode)==='installment'){ const t=String(p.paymentTarget||'main'); return t==='bus'?'إكمال أقساط - قسط الباص':(t==='kit'?'إكمال أقساط - قسط الطقم':'إكمال أقساط - قسط الاشتراك'); } return 'اشتراك جديد'; }
 function paymentsQuery(){
   const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
   $('content').innerHTML = `<div class="panel query-panel"><div class="panel-head"><h3><i class="fa-solid fa-magnifying-glass-dollar"></i> الاستعلام الذكي عن الدفعات</h3></div><input id="queryInput" class="big-search" list="queryNames" placeholder="اكتب اسم اللاعب أو امسح QR"><datalist id="queryNames">${opts}</datalist><div id="queryResult"></div></div>`;
@@ -575,22 +692,22 @@ function paymentsQuery(){
   $('queryInput').addEventListener('keydown', e => { if(e.key==='Enter') queryPayment(e.target.value.trim()); });
 }
 function getPlayerFinance(player){
-  const pays = DB.payments.filter(x=>String(x.playerId)===String(player.id)).sort((a,b)=>String(b.expireDate).localeCompare(String(a.expireDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  const pays = (DB.payments || []).filter(x=>String(x.playerId)===String(player.id) || String(x.playerName||'').trim()===String(player.name||'').trim()).sort((a,b)=>String(b.paymentDate || b.expireDate).localeCompare(String(a.paymentDate || a.expireDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
   const last = pays[0] || null;
   const fee = defaultFee();
   const mainPaid = pays.reduce((s,p)=>s+paymentMainPaid(p),0);
-  const busSubscribed = pays.some(paymentBusIncluded);
-  const kitSubscribed = pays.some(paymentKitIncluded);
-  const busPaid = pays.reduce((s,p)=>s+num(p.busAmount),0);
-  const kitPaid = pays.reduce((s,p)=>s+num(p.kitAmount),0);
+  const busPaid = pays.reduce((s,p)=>s+paymentBusPaid(p),0);
+  const kitPaid = pays.reduce((s,p)=>s+paymentKitPaid(p),0);
+  const busSubscribed = pays.some(paymentBusIncluded) || busPaid > 0;
+  const kitSubscribed = pays.some(paymentKitIncluded) || kitPaid > 0;
   const mainRemaining = Math.max(fee - mainPaid, 0);
   const busRemaining = busSubscribed ? Math.max(busFee() - busPaid, 0) : 0;
   const kitRemaining = kitSubscribed ? Math.max(kitFee() - kitPaid, 0) : 0;
   const totalPaid = mainPaid + busPaid + kitPaid;
   const totalDue = fee + (busSubscribed ? busFee() : 0) + (kitSubscribed ? kitFee() : 0);
   const totalRemaining = mainRemaining + busRemaining + kitRemaining;
-  const active = !!(last && String(last.expireDate) >= today());
-  const complete = active && totalRemaining <= 0;
+  const active = !!(last && String(last.expireDate || '') >= today());
+  const complete = totalRemaining <= 0 && pays.length > 0;
   const parts = [];
   if(mainRemaining>0) parts.push(`رسم الاشتراك: ${money(mainRemaining)}`);
   if(busRemaining>0) parts.push(`الباص: ${money(busRemaining)}`);
